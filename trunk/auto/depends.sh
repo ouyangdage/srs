@@ -33,16 +33,10 @@ echo "Required tools are ok."
 OS_IS_UBUNTU=NO
 function Ubuntu_prepare()
 {
-    uname -v|grep Ubuntu >/dev/null 2>&1
-    ret=$?; if [[ 0 -ne $ret ]]; then
-        # for debian, we think it's ubuntu also.
-        # for example, the wheezy/sid which is debian armv7 linux, can not identified by uname -v.
-        if [[ ! -f /etc/debian_version ]]; then
-            return 0;
-        fi
-    fi
-
-    OS_IS_UBUNTU=YES
+    # For Debian, we think it's ubuntu also.
+    # For example, the wheezy/sid which is debian armv7 linux, can not identified by uname -v.
+    OS_IS_UBUNTU=$(apt-get --version >/dev/null 2>&1 && echo YES)
+    if [[ $OS_IS_UBUNTU != YES ]]; then return 0; fi
     echo "Installing tools for Ubuntu."
     
     gcc --help >/dev/null 2>&1; ret=$?; if [[ 0 -ne $ret ]]; then
@@ -134,11 +128,8 @@ Ubuntu_prepare; ret=$?; if [[ 0 -ne $ret ]]; then echo "Install tools for ubuntu
 OS_IS_CENTOS=NO
 function Centos_prepare()
 {
-    if [[ ! -f /etc/redhat-release ]]; then
-        return 0;
-    fi
-
-    OS_IS_CENTOS=YES
+    OS_IS_CENTOS=$(yum --version >/dev/null 2>&1 && echo YES)
+    if [[ $OS_IS_CENTOS != YES ]]; then return 0; fi
     echo "Installing tools for Centos."
     
     gcc --help >/dev/null 2>&1; ret=$?; if [[ 0 -ne $ret ]]; then
@@ -321,9 +312,12 @@ function OSX_prepare()
 OSX_prepare; ret=$?; if [[ 0 -ne $ret ]]; then echo "OSX prepare failed, ret=$ret"; exit $ret; fi
 
 #####################################################################################
-# Whether CPU is loongarch
+# Detect CPU archs.
 #####################################################################################
-OS_IS_LOONGARCH=$(uname -p|grep -q loongarch && echo YES)
+OS_IS_LOONGARCH64=$(g++ -dM -E - </dev/null |grep '#define __loongarch64 1' -q && echo YES)
+OS_IS_MIPS64=$(g++ -dM -E - </dev/null |grep '#define __mips64 1' -q && echo YES)
+OS_IS_LOONGSON=$(uname -r |grep -q loongson && echo YES)
+echo "OS_IS_LOONGARCH64:$OS_IS_LOONGARCH64, OS_IS_MIPS64:$OS_IS_MIPS64, OS_IS_LOONGSON:$OS_IS_LOONGSON"
 
 #####################################################################################
 # for Centos, auto install tools by yum
@@ -373,6 +367,22 @@ function _srs_link_file()
 if [[ $OS_IS_UBUNTU = NO && $OS_IS_CENTOS = NO && $OS_IS_OSX = NO && $SRS_CROSS_BUILD = NO ]]; then
     echo "Your OS `uname -s` is not supported."
     exit 1
+fi
+
+#####################################################################################
+# Try to load cache if exists /usr/local/srs-cache
+#####################################################################################
+# Use srs-cache from base image.
+if [[ -d /usr/local/srs-cache/srs/trunk/objs && $(pwd) != "/usr/local/srs-cache/srs/trunk" ]]; then
+    SOURCE_DIR=$(ls -d /usr/local/srs-cache/srs/trunk/objs/Platform-* 2>/dev/null|head -n 1)
+    if [[ -d $SOURCE_DIR ]]; then
+        TARGET_DIR=${SRS_OBJS}/${SRS_PLATFORM} &&
+        echo "Build from cache, source=$SOURCE_DIR, target=$TARGET_DIR" &&
+        rm -rf $TARGET_DIR && mkdir -p ${SRS_OBJS} && cp -R $SOURCE_DIR $TARGET_DIR &&
+        du -sh /usr/local/srs-cache/srs/trunk/objs/Platform-* &&
+        du -sh objs/Platform-* &&
+        ls -lh objs
+    fi
 fi
 
 #####################################################################################
@@ -553,8 +563,8 @@ if [[ $SRS_SSL == YES && $SRS_USE_SYS_SSL != YES ]]; then
     fi
     # Patch for loongarch mips64, disable ASM for build failed message as bellow:
     #       Error: opcode not supported on this processor: mips3 (mips3)
-    g++ -dM -E - </dev/null |grep '#define __mips64 1' -q && OPENSSL_CONFIG="./Configure linux64-mips64"
-    uname -r |grep -q "loongson" && OPENSSL_OPTIONS="$OPENSSL_OPTIONS -no-asm"
+    if [[ $OS_IS_MIPS64 == YES ]]; then OPENSSL_CONFIG="./Configure linux64-mips64"; fi
+    if [[ $OS_IS_LOONGSON == YES ]]; then OPENSSL_OPTIONS="$OPENSSL_OPTIONS -no-asm"; fi
     # For RTC, we should use ASM to improve performance, not a little improving.
     if [[ $SRS_RTC == NO || $SRS_NASM == NO ]]; then
         OPENSSL_OPTIONS="$OPENSSL_OPTIONS -no-asm"
@@ -627,7 +637,7 @@ if [[ $SRS_RTC == YES ]]; then
     if [[ $SRS_CROSS_BUILD == YES ]]; then
         SRTP_OPTIONS="$SRTP_OPTIONS --host=$SRS_CROSS_BUILD_HOST"
     fi
-    if [[ $OS_IS_LOONGARCH = YES ]]; then
+    if [[ $OS_IS_LOONGARCH64 = YES ]]; then
         SRTP_OPTIONS="$SRTP_OPTIONS --build=loongarch64-unknown-linux-gnu"
     fi
     # Patched ST from https://github.com/ossrs/state-threads/tree/srs
@@ -662,7 +672,7 @@ if [[ $SRS_RTC == YES && $SRS_CROSS_BUILD == NO ]]; then
     if [[ $SRS_SHARED_FFMPEG == NO ]]; then
         OPUS_OPTIONS="--disable-shared --disable-doc"
     fi
-    if [[ $OS_IS_LOONGARCH = YES ]]; then
+    if [[ $OS_IS_LOONGARCH64 = YES ]]; then
         OPUS_OPTIONS="$OPUS_OPTIONS --build=loongarch64-unknown-linux-gnu"
     fi
     if [[ -f ${SRS_OBJS}/${SRS_PLATFORM}/opus-1.3.1/_release/lib/libopus.a ]]; then
@@ -702,6 +712,8 @@ if [[ $SRS_FFMPEG_FIT == YES ]]; then
     if [[ $SRS_SHARED_FFMPEG == YES ]]; then
         FFMPEG_OPTIONS="$FFMPEG_OPTIONS --enable-shared"
     fi
+    # For loongson/mips64, disable mips64r6, or build failed.
+    if [[ $OS_IS_MIPS64 == YES && $OS_IS_LOONGSON == YES ]]; then FFMPEG_OPTIONS="$FFMPEG_OPTIONS --disable-mips64r6"; fi
     # For cross-build.
     if [[ $SRS_CROSS_BUILD == YES ]]; then
         FFMPEG_OPTIONS="$FFMPEG_OPTIONS --enable-cross-compile --target-os=linux --disable-pthreads"
@@ -747,7 +759,7 @@ if [[ $SRS_FFMPEG_FIT == YES ]]; then
               # For MIPS, which fail with:
               #     ./libavutil/libm.h:54:32: error: static declaration of 'cbrt' follows non-static declaration
               #     /root/openwrt/staging_dir/toolchain-mipsel_24kc_gcc-8.4.0_musl/include/math.h:163:13: note: previous declaration of 'cbrt' was here
-              if [[ $SRS_CROSS_BUILD_ARCH == "mipsel" ]]; then
+              if [[ $SRS_CROSS_BUILD_ARCH == "mipsel" || $SRS_CROSS_BUILD_ARCH == "arm" ]]; then
                 sed -i -e 's/#define HAVE_CBRT 0/#define HAVE_CBRT 1/g' config.h &&
                 sed -i -e 's/#define HAVE_CBRTF 0/#define HAVE_CBRTF 1/g' config.h &&
                 sed -i -e 's/#define HAVE_COPYSIGN 0/#define HAVE_COPYSIGN 1/g' config.h &&
@@ -816,11 +828,17 @@ if [[ $SRS_SRT == YES ]]; then
                 exit -1;
             fi
             # Always disable c++11 for libsrt, because only the srt-app requres it.
-            LIBSRT_OPTIONS="--disable-apps  --enable-static --enable-c++11=0"
+            LIBSRT_OPTIONS="--enable-apps=0  --enable-static=1 --enable-c++11=0"
             if [[ $SRS_SHARED_SRT == YES ]]; then
                 LIBSRT_OPTIONS="$LIBSRT_OPTIONS --enable-shared=1"
             else
                 LIBSRT_OPTIONS="$LIBSRT_OPTIONS --enable-shared=0"
+            fi
+            # For cross-build.
+            if [[ $SRS_CROSS_BUILD == YES ]]; then
+                TOOL_GCC_REALPATH=$(realpath $(which $SRS_TOOL_CC))
+                SRT_COMPILER_PREFIX=$(echo $TOOL_GCC_REALPATH |sed 's/-gcc.*$/-/')
+                LIBSRT_OPTIONS="$LIBSRT_OPTIONS --with-compiler-prefix=$SRT_COMPILER_PREFIX"
             fi
             # Start build libsrt.
             rm -rf ${SRS_OBJS}/${SRS_PLATFORM}/srt-1-fit && cd ${SRS_OBJS}/${SRS_PLATFORM} &&

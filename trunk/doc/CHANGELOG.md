@@ -6,7 +6,10 @@ The changelog for SRS.
 
 ## SRS 5.0 Changelog
 
-* v5.0, 2022-08-06, Support MIPS 64bits for loongson 3A4000/3B3000. v5.0.34
+* v5.0, 2022-08-14, Fix [#2747](https://github.com/ossrs/srs/issues/2747): Support Apple Silicon M1(aarch64). v5.0.41
+* v5.0, 2022-08-12, Support crossbuild for hisiv500. v5.0.40
+* v5.0, 2022-08-10, Build: Detect OS by packager. v5.0.39
+* v5.0, 2022-08-06, Support MIPS 64bits for loongson 3A4000/3B3000. v5.0.38
 * v5.0, 2022-06-29, Support multiple threads by thread pool. v5.0.32
 * v5.0, 2022-06-28, ST: Support thread-local for multiple threads. v5.0.31
 * v5.0, 2022-06-17, Merge [#3010](https://github.com/ossrs/srs/pull/3010): SRT: Support Coroutine Native SRT over ST. (#3010). v5.0.30
@@ -41,6 +44,7 @@ The changelog for SRS.
 
 ## SRS 4.0 Changelog
 
+* v4.0, 2022-08-10, Fix server id generator bug. v4.0.254
 * v4.0, 2022-06-29, Update SRS image for r.ossrs.net. v4.0.253
 * v4.0, 2022-06-11, For [#3058](https://github.com/ossrs/srs/pull/3058): Docker: Support x86_64, armv7 and aarch64 docker image (#3058). v4.0.252
 * v4.0, 2022-03-19, For [#2893](https://github.com/ossrs/srs/pull/2893): SRT: Decouple publish with play url (#2893). v4.0.251

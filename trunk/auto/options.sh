@@ -160,10 +160,10 @@ Toolchain options:
   --extra-flags=<EFLAGS>    Set EFLAGS as CFLAGS and CXXFLAGS. Also passed to ST as EXTRA_CFLAGS.
 
 Cross Build options:        @see https://ossrs.net/lts/zh-cn/docs/v4/doc/arm#ubuntu-cross-build-srs
-  --cpu=<CPU>               Toolchain: Select the minimum required CPU for cross-build.
-  --arch=<ARCH>             Toolchain: Select architecture for cross-build.
-  --host=<BUILD>            Toolchain: Cross-compile to build programs to run on HOST.
-  --cross-prefix=<PREFIX>   Toolchain: Use PREFIX for compilation tools.
+  --cpu=<CPU>               Toolchain: Select the minimum required CPU for cross-build. For example: --cpu=24kc
+  --arch=<ARCH>             Toolchain: Select architecture for cross-build. For example: --arch=aarch64
+  --host=<BUILD>            Toolchain: Cross-compile to build programs to run on HOST. For example: --host=aarch64-linux-gnu
+  --cross-prefix=<PREFIX>   Toolchain: Use PREFIX for compilation tools. For example: --cross-prefix=aarch64-linux-gnu-
 
 Experts:
   --sys-ssl=on|off          Do not compile ssl, use system ssl(-lssl) if required. Default: $(value2switch $SRS_USE_SYS_SSL)

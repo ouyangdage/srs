@@ -20,7 +20,7 @@
 
 // The project informations, may sent to client in HTTP header or RTMP metadata.
 #define RTMP_SIG_SRS_KEY "SRS"
-#define RTMP_SIG_SRS_CODE "Leo"
+#define RTMP_SIG_SRS_CODE "Bee"
 #define RTMP_SIG_SRS_URL "https://github.com/ossrs/srs"
 #define RTMP_SIG_SRS_LICENSE "MIT"
 #define SRS_CONSTRIBUTORS "https://github.com/ossrs/srs/blob/develop/trunk/AUTHORS.md#contributors"
@@ -58,8 +58,8 @@
     (void)0
 
 // Check CPU for ST(state-threads), please read https://github.com/ossrs/state-threads/issues/22
-#if !defined(__amd64__) && !defined(__x86_64__) && !defined(__i386__) && !defined(__arm__) && !defined(__aarch64__) && !defined(__mips__) && !defined(__loongarch__) && !defined(__riscv)
-    #error "Only support i386/amd64/x86_64/arm/aarch64/mips/loongarch/riscv cpu"
+#if !defined(__amd64__) && !defined(__x86_64__) && !defined(__i386__) && !defined(__arm__) && !defined(__aarch64__) && !defined(__mips__) && !defined(__mips64) && !defined(__loongarch64) && !defined(__riscv)
+    #error "Only support i386/amd64/x86_64/arm/aarch64/mips/mips64/loongarch64/riscv cpu"
 #endif
 
 // Error predefined for all modules.
