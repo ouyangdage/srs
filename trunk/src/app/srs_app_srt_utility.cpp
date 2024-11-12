@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_app_srt_utility.hpp>
@@ -138,6 +138,10 @@ bool srs_srt_streamid_to_request(const std::string& streamid, SrtMode& mode, Srs
         request->stream = stream_with_params.substr(0, pos);
         request->param = stream_with_params.substr(pos + 1);
     }
+
+    request->host = srs_get_public_internet_address();
+    if (request->vhost.empty()) request->vhost = request->host;
+    request->tcUrl = srs_generate_tc_url("srt", request->host, request->vhost, request->app, request->port);
 
     return ret;
 }

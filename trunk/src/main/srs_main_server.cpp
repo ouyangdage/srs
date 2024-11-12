@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_core.hpp>
@@ -24,6 +24,10 @@ using namespace std;
 #include <gperftools/malloc_extension.h>
 #endif
 
+#ifdef SRS_SANITIZER_LOG
+#include <sanitizer/asan_interface.h>
+#endif
+
 #include <unistd.h>
 using namespace std;
 
@@ -38,6 +42,8 @@ using namespace std;
 #include <srs_kernel_file.hpp>
 #include <srs_app_hybrid.hpp>
 #include <srs_app_threads.hpp>
+#include <srs_kernel_error.hpp>
+
 #ifdef SRS_RTC
 #include <srs_app_rtc_conn.hpp>
 #include <srs_app_rtc_server.hpp>
@@ -51,7 +57,6 @@ using namespace std;
 // pre-declare
 srs_error_t run_directly_or_daemon();
 srs_error_t run_in_thread_pool();
-srs_error_t srs_detect_docker();
 void show_macro_features();
 
 // @global log and context.
@@ -67,12 +72,38 @@ extern const char* _srs_version;
 // @global main SRS server, for debugging
 SrsServer* _srs_server = NULL;
 
+// Whether setup config by environment variables, see https://github.com/ossrs/srs/issues/2277
+bool _srs_config_by_env = false;
+
+// The binary name of SRS.
+const char* _srs_binary = NULL;
+
+// @global Other variables.
+bool _srs_in_docker = false;
+
+#ifdef SRS_SANITIZER_LOG
+extern void asan_report_callback(const char* str);
+#endif
+
+extern SrsPps* _srs_pps_cids_get;
+extern SrsPps* _srs_pps_cids_set;
+
 /**
  * main entrance.
  */
-srs_error_t do_main(int argc, char** argv)
+srs_error_t do_main(int argc, char** argv, char** envp)
 {
     srs_error_t err = srs_success;
+
+    // TODO: Might fail if change working directory.
+    _srs_binary = argv[0];
+
+    // For sanitizer on macOS, to avoid the warning on startup.
+#if defined(SRS_OSX) && defined(SRS_SANITIZER)
+    if (!getenv("MallocNanoZone")) {
+        fprintf(stderr, "Asan: Please setup the env MallocNanoZone=0 to disable the warning, see https://stackoverflow.com/a/70209891/17679565\n");
+    }
+#endif
 
     // Initialize global and thread-local variables.
     if ((err = srs_global_initialize()) != srs_success) {
@@ -102,11 +133,6 @@ srs_error_t do_main(int argc, char** argv)
 #ifdef SRS_GPERF_MP
 #warning "gmp is not used for memory leak, please use gmc instead."
 #endif
-
-    // Ignore any error while detecting docker.
-    if ((err = srs_detect_docker()) != srs_success) {
-        srs_error_reset(err);
-    }
     
     // never use srs log(srs_trace, srs_error, etc) before config parse the option,
     // which will load the log config and apply it.
@@ -128,13 +154,22 @@ srs_error_t do_main(int argc, char** argv)
     if ((err = _srs_log->initialize()) != srs_success) {
         return srs_error_wrap(err, "log initialize");
     }
+
+    // Detect whether set SRS config by envrionment variables.
+    for (char** pp = envp; *pp; pp++) {
+        char* p = *pp;
+        if (p[0] == 'S' && p[1] == 'R' && p[2] == 'S' && p[3] == '_') {
+            _srs_config_by_env = true;
+            break;
+        }
+    }
     
     // config already applied to log.
-    srs_trace2(TAG_MAIN, "%s, %s", RTMP_SIG_SRS_SERVER, RTMP_SIG_SRS_LICENSE);
+    srs_trace("%s, %s", RTMP_SIG_SRS_SERVER, RTMP_SIG_SRS_LICENSE);
     srs_trace("authors: %sand %s", RTMP_SIG_SRS_AUTHORS, SRS_CONSTRIBUTORS);
-    srs_trace("cwd=%s, work_dir=%s, build: %s, configure: %s, uname: %s, osx: %d, pkg: %s, region: %s, source: %s",
-        _srs_config->cwd().c_str(), cwd.c_str(), SRS_BUILD_DATE, SRS_USER_CONFIGURE, SRS_UNAME, SRS_OSX_BOOL, SRS_PACKAGER,
-        srs_getenv("SRS_REGION").c_str(), srs_getenv("SRS_SOURCE").c_str());
+    srs_trace("cwd=%s, work_dir=%s, build: %s, configure: %s, uname: %s, osx: %d, env: %d, pkg: %s",
+        _srs_config->cwd().c_str(), cwd.c_str(), SRS_BUILD_DATE, SRS_USER_CONFIGURE, SRS_UNAME, SRS_OSX_BOOL,
+        _srs_config_by_env, SRS_PACKAGER);
     srs_trace("configure detail: " SRS_CONFIGURE);
 #ifdef SRS_EMBEDED_TOOL_CHAIN
     srs_trace("crossbuild tool chain: " SRS_EMBEDED_TOOL_CHAIN);
@@ -199,17 +234,28 @@ srs_error_t do_main(int argc, char** argv)
         srs_trace("tcmalloc: set release-rate %.2f=>%.2f", otrr, trr);
     }
 #endif
-    
+
+#ifdef SRS_SANITIZER_LOG
+    __asan_set_error_report_callback(asan_report_callback);
+#endif
+
     if ((err = run_directly_or_daemon()) != srs_success) {
         return srs_error_wrap(err, "run");
     }
-    
+
     return err;
 }
 
-int main(int argc, char** argv)
+int main(int argc, char** argv, char** envp)
 {
-    srs_error_t err = do_main(argc, argv);
+#ifdef SRS_SANITIZER
+    // Setup the primordial stack for st. Use the current variable address as the stack top.
+    // This is not very accurate but sufficient.
+    void* p = NULL;
+    srs_set_primordial_stack(&p);
+#endif
+
+    srs_error_t err = do_main(argc, argv, envp);
 
     if (err != srs_success) {
         srs_error("Failed, %s", srs_error_desc(err).c_str());
@@ -252,12 +298,12 @@ void show_macro_features()
         ss << ", stat:" << srs_bool2switch(true);
         // sc(stream-caster)
         ss << ", sc:" << srs_bool2switch(true);
-        srs_trace(ss.str().c_str());
+        srs_trace("%s", ss.str().c_str());
     }
     
     if (true) {
         stringstream ss;
-        ss << "SRS on ";
+        ss << "SRS on";
 #if defined(__amd64__)
         ss << " amd64";
 #endif
@@ -268,7 +314,7 @@ void show_macro_features()
         ss << " i386";
 #endif
 #if defined(__arm__)
-        ss << "arm";
+        ss << " arm";
 #endif
 #if defined(__aarch64__)
         ss << " aarch64";
@@ -281,7 +327,7 @@ void show_macro_features()
         << ", writev:" << sysconf(_SC_IOV_MAX) << ", encoding:" << (srs_is_little_endian()? "little-endian":"big-endian")
         << ", HZ:" << (int)sysconf(_SC_CLK_TCK);
         
-        srs_trace(ss.str().c_str());
+        srs_trace("%s", ss.str().c_str());
     }
     
     if (true) {
@@ -299,7 +345,7 @@ void show_macro_features()
 #endif
         ss << ", default:" << SRS_PERF_MR_ENABLED << ", sleep:" << srsu2msi(SRS_PERF_MR_SLEEP) << "ms";
         
-        srs_trace(ss.str().c_str());
+        srs_trace("%s", ss.str().c_str());
     }
     
     if (true) {
@@ -335,7 +381,7 @@ void show_macro_features()
         ss << "auto(guess by merged write)";
 #endif
         
-        srs_trace(ss.str().c_str());
+        srs_trace("%s", ss.str().c_str());
     }
     
     // others
@@ -356,48 +402,9 @@ void show_macro_features()
 #endif
 }
 
-// Detect docker by https://stackoverflow.com/a/41559867
-bool _srs_in_docker = false;
-srs_error_t srs_detect_docker()
-{
-    srs_error_t err = srs_success;
-
-    _srs_in_docker = false;
-
-    SrsFileReader fr;
-    if ((err = fr.open("/proc/1/cgroup")) != srs_success) {
-        return err;
-    }
-
-    ssize_t nn;
-    char buf[1024];
-    if ((err = fr.read(buf, sizeof(buf), &nn)) != srs_success) {
-        return err;
-    }
-
-    if (nn <= 0) {
-        return err;
-    }
-
-    string s(buf, nn);
-    if (srs_string_contains(s, "/docker")) {
-        _srs_in_docker = true;
-    }
-
-    return err;
-}
-
 srs_error_t run_directly_or_daemon()
 {
     srs_error_t err = srs_success;
-
-    // Try to load the config if docker detect failed.
-    if (!_srs_in_docker) {
-        _srs_in_docker = _srs_config->get_in_docker();
-        if (_srs_in_docker) {
-            srs_trace("enable in_docker by config");
-        }
-    }
 
     // Load daemon from config, disable it for docker.
     // @see https://github.com/ossrs/srs/issues/1594
@@ -458,11 +465,15 @@ srs_error_t run_in_thread_pool()
 {
     srs_error_t err = srs_success;
 
-    // Initialize the thread pool.
+    // Initialize the thread pool, even if we run in single thread mode.
     if ((err = _srs_thread_pool->initialize()) != srs_success) {
         return srs_error_wrap(err, "init thread pool");
     }
 
+#ifdef SRS_SINGLE_THREAD
+    srs_trace("Run in single thread mode");
+    return run_hybrid_server(NULL);
+#else
     // Start the hybrid service worker thread, for RTMP and RTC server, etc.
     if ((err = _srs_thread_pool->execute("hybrid", run_hybrid_server, (void*)NULL)) != srs_success) {
         return srs_error_wrap(err, "start hybrid server thread");
@@ -471,8 +482,10 @@ srs_error_t run_in_thread_pool()
     srs_trace("Pool: Start threads primordial=1, hybrids=1 ok");
 
     return _srs_thread_pool->run();
+#endif
 }
 
+#include <srs_app_tencentcloud.hpp>
 srs_error_t run_hybrid_server(void* /*arg*/)
 {
     srs_error_t err = srs_success;
@@ -497,6 +510,12 @@ srs_error_t run_hybrid_server(void* /*arg*/)
     if ((err = _srs_circuit_breaker->initialize()) != srs_success) {
         return srs_error_wrap(err, "init circuit breaker");
     }
+
+#ifdef SRS_APM
+    // When startup, create a span for server information.
+    ISrsApmSpan* span = _srs_apm->span("main")->set_kind(SrsApmKindServer);
+    srs_freep(span);
+#endif
 
     // Should run util hybrid servers all done.
     if ((err = _srs_hybrid->run()) != srs_success) {

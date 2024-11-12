@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_protocol_http_stack.hpp>
@@ -23,6 +23,9 @@ using namespace std;
 
 // @see ISrsHttpMessage._http_ts_send_buffer
 #define SRS_HTTP_TS_SEND_BUFFER_SIZE 4096
+
+#define SRS_HTTP_AUTH_SCHEME_BASIC "Basic"
+#define SRS_HTTP_AUTH_PREFIX_BASIC SRS_HTTP_AUTH_SCHEME_BASIC " "
 
 // get the status text of code.
 string srs_generate_http_status_text(int status)
@@ -152,6 +155,10 @@ void SrsHttpHeader::set(string key, string value)
         pchar = ch;
     }
 
+    if (headers.find(key) == headers.end()) {
+        keys_.push_back(key);
+    }
+
     headers[key] = value;
 }
 
@@ -169,9 +176,18 @@ string SrsHttpHeader::get(string key)
 
 void SrsHttpHeader::del(string key)
 {
-    map<string, string>::iterator it = headers.find(key);
-    if (it != headers.end()) {
-        headers.erase(it);
+    if (true) {
+        vector<string>::iterator it = std::find(keys_.begin(), keys_.end(), key);
+        if (it != keys_.end()) {
+            it = keys_.erase(it);
+        }
+    }
+
+    if (true) {
+        map<string, string>::iterator it = headers.find(key);
+        if (it != headers.end()) {
+            headers.erase(it);
+        }
     }
 }
 
@@ -182,10 +198,11 @@ int SrsHttpHeader::count()
 
 void SrsHttpHeader::dumps(SrsJsonObject* o)
 {
-    map<string, string>::iterator it;
-    for (it = headers.begin(); it != headers.end(); ++it) {
-        string v = it->second;
-        o->set(it->first, SrsJsonAny::str(v.c_str()));
+    vector<string>::iterator it;
+    for (it = keys_.begin(); it != keys_.end(); ++it) {
+        const string& key = *it;
+        const string& value = headers[key];
+        o->set(key, SrsJsonAny::str(value.c_str()));
     }
 }
 
@@ -217,9 +234,11 @@ void SrsHttpHeader::set_content_type(string ct)
 
 void SrsHttpHeader::write(stringstream& ss)
 {
-    map<string, string>::iterator it;
-    for (it = headers.begin(); it != headers.end(); ++it) {
-        ss << it->first << ": " << it->second << SRS_HTTP_CRLF;
+    vector<string>::iterator it;
+    for (it = keys_.begin(); it != keys_.end(); ++it) {
+        const string& key = *it;
+        const string& value = headers[key];
+        ss << key << ": " << value << SRS_HTTP_CRLF;
     }
 }
 
@@ -236,6 +255,14 @@ ISrsHttpResponseReader::ISrsHttpResponseReader()
 }
 
 ISrsHttpResponseReader::~ISrsHttpResponseReader()
+{
+}
+
+ISrsHttpRequestWriter::ISrsHttpRequestWriter()
+{
+}
+
+ISrsHttpRequestWriter::~ISrsHttpRequestWriter()
 {
 }
 
@@ -382,6 +409,8 @@ srs_error_t SrsHttpFileServer::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMes
         return serve_mp4_file(w, r, fullpath);
     } else if (srs_string_ends_with(upath, ".m3u8")) {
         return serve_m3u8_file(w, r, fullpath);
+    } else if (srs_string_ends_with(upath, ".ts")) {
+        return serve_ts_file(w, r, fullpath);
     }
     
     // serve common static file.
@@ -392,8 +421,7 @@ srs_error_t SrsHttpFileServer::serve_file(ISrsHttpResponseWriter* w, ISrsHttpMes
 {
     srs_error_t err = srs_success;
 
-    SrsFileReader* fs = fs_factory->create_file_reader();
-    SrsAutoFree(SrsFileReader, fs);
+    SrsUniquePtr<SrsFileReader> fs(fs_factory->create_file_reader());
 
     if ((err = fs->open(fullpath)) != srs_success) {
         return srs_error_wrap(err, "open file %s", fullpath.c_str());
@@ -435,8 +463,7 @@ srs_error_t SrsHttpFileServer::serve_file(ISrsHttpResponseWriter* w, ISrsHttpMes
         _mime[".jpg"] = "image/jpeg";
         _mime[".gif"] = "image/gif";
         // For MPEG-DASH.
-        //_mime[".mpd"] = "application/dash+xml";
-        _mime[".mpd"] = "text/xml";
+        _mime[".mpd"] = "application/dash+xml";
         _mime[".m4s"] = "video/iso.segment";
         _mime[".mp4v"] = "video/mp4";
     }
@@ -456,7 +483,7 @@ srs_error_t SrsHttpFileServer::serve_file(ISrsHttpResponseWriter* w, ISrsHttpMes
     
     // write body.
     int64_t left = length;
-    if ((err = copy(w, fs, r, left)) != srs_success) {
+    if ((err = copy(w, fs.get(), r, left)) != srs_success) {
         return srs_error_wrap(err, "copy file=%s size=%" PRId64, fullpath.c_str(), left);
     }
     
@@ -531,6 +558,11 @@ srs_error_t SrsHttpFileServer::serve_m3u8_file(ISrsHttpResponseWriter * w, ISrsH
     return serve_m3u8_ctx(w, r, fullpath);
 }
 
+srs_error_t SrsHttpFileServer::serve_ts_file(ISrsHttpResponseWriter * w, ISrsHttpMessage * r, std::string fullpath)
+{
+    return serve_ts_ctx(w, r, fullpath);
+}
+
 srs_error_t SrsHttpFileServer::serve_flv_stream(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, string fullpath, int64_t offset)
 {
     // @remark For common http file server, we don't support stream request, please use SrsVodStream instead.
@@ -548,7 +580,12 @@ srs_error_t SrsHttpFileServer::serve_mp4_stream(ISrsHttpResponseWriter* w, ISrsH
 srs_error_t SrsHttpFileServer::serve_m3u8_ctx(ISrsHttpResponseWriter * w, ISrsHttpMessage * r, std::string fullpath)
 {
     // @remark For common http file server, we don't support stream request, please use SrsVodStream instead.
-    // TODO: FIXME: Support range in header https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Range_requests
+    return serve_file(w, r, fullpath);
+}
+
+srs_error_t SrsHttpFileServer::serve_ts_ctx(ISrsHttpResponseWriter * w, ISrsHttpMessage * r, std::string fullpath)
+{
+    // @remark For common http file server, we don't support stream request, please use SrsVodStream instead.
     return serve_file(w, r, fullpath);
 }
 
@@ -557,18 +594,17 @@ srs_error_t SrsHttpFileServer::copy(ISrsHttpResponseWriter* w, SrsFileReader* fs
     srs_error_t err = srs_success;
     
     int64_t left = size;
-    char* buf = new char[SRS_HTTP_TS_SEND_BUFFER_SIZE];
-    SrsAutoFreeA(char, buf);
-    
+    SrsUniquePtr<char[]> buf(new char[SRS_HTTP_TS_SEND_BUFFER_SIZE]);
+
     while (left > 0) {
         ssize_t nread = -1;
         int max_read = srs_min(left, SRS_HTTP_TS_SEND_BUFFER_SIZE);
-        if ((err = fs->read(buf, max_read, &nread)) != srs_success) {
+        if ((err = fs->read(buf.get(), max_read, &nread)) != srs_success) {
             return srs_error_wrap(err, "read limit=%d, left=%" PRId64, max_read, left);
         }
         
         left -= nread;
-        if ((err = w->write(buf, (int)nread)) != srs_success) {
+        if ((err = w->write(buf.get(), (int)nread)) != srs_success) {
             return srs_error_wrap(err, "write limit=%d, bytes=%d, left=%" PRId64, max_read, (int)nread, left);
         }
     }
@@ -596,7 +632,7 @@ ISrsHttpMatchHijacker::~ISrsHttpMatchHijacker()
 {
 }
 
-ISrsHttpServeMux::ISrsHttpServeMux()
+ISrsHttpServeMux::ISrsHttpServeMux() : ISrsHttpHandler()
 {
 }
 
@@ -645,7 +681,7 @@ void SrsHttpServeMux::unhijack(ISrsHttpMatchHijacker* h)
     if (it == hijackers.end()) {
         return;
     }
-    hijackers.erase(it);
+    it = hijackers.erase(it);
 }
 
 srs_error_t SrsHttpServeMux::handle(std::string pattern, ISrsHttpHandler* handler)
@@ -712,6 +748,35 @@ srs_error_t SrsHttpServeMux::handle(std::string pattern, ISrsHttpHandler* handle
     }
     
     return srs_success;
+}
+
+void SrsHttpServeMux::unhandle(std::string pattern, ISrsHttpHandler* handler)
+{
+    if (true) {
+        std::map<std::string, SrsHttpMuxEntry*>::iterator it = entries.find(pattern);
+        if (it != entries.end()) {
+            SrsHttpMuxEntry* entry = it->second;
+            entries.erase(it);
+
+            // We don't free the handler, because user should free it.
+            if (entry->handler == handler) {
+                entry->handler = NULL;
+            }
+
+            // Should always free the entry.
+            srs_freep(entry);
+        }
+    }
+
+    std::string vhost = pattern;
+    if (pattern.at(0) != '/') {
+        if (pattern.find("/") != string::npos) {
+            vhost = pattern.substr(0, pattern.find("/"));
+        }
+
+        std::map<std::string, ISrsHttpHandler*>::iterator it = vhosts.find(vhost);
+        if (it != vhosts.end()) vhosts.erase(it);
+    }
 }
 
 srs_error_t SrsHttpServeMux::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
@@ -824,22 +889,20 @@ bool SrsHttpServeMux::path_match(string pattern, string path)
     return false;
 }
 
-SrsHttpCorsMux::SrsHttpCorsMux()
+SrsHttpCorsMux::SrsHttpCorsMux(ISrsHttpHandler* h)
 {
-    next = NULL;
     enabled = false;
     required = false;
+    next_ = h;
 }
 
 SrsHttpCorsMux::~SrsHttpCorsMux()
 {
 }
 
-srs_error_t SrsHttpCorsMux::initialize(ISrsHttpServeMux* worker, bool cros_enabled)
+srs_error_t SrsHttpCorsMux::initialize(bool cros_enabled)
 {
-    next = worker;
     enabled = cros_enabled;
-    
     return srs_success;
 }
 
@@ -854,10 +917,23 @@ srs_error_t SrsHttpCorsMux::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessag
     // When CORS required, set the CORS headers.
     if (required) {
         SrsHttpHeader* h = w->header();
+        // SRS does not need cookie or credentials, so we disable CORS credentials, and use * for CORS origin,
+        // headers, expose headers and methods.
         h->set("Access-Control-Allow-Origin", "*");
-        h->set("Access-Control-Allow-Methods", "GET, POST, HEAD, PUT, DELETE, OPTIONS");
-        h->set("Access-Control-Expose-Headers", "Server,range,Content-Length,Content-Range");
-        h->set("Access-Control-Allow-Headers", "origin,range,accept-encoding,referer,Cache-Control,X-Proxy-Authorization,X-Requested-With,Content-Type");
+        // See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers
+        h->set("Access-Control-Allow-Headers", "*");
+        // See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Methods
+        h->set("Access-Control-Allow-Methods", "*");
+        // See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Expose-Headers
+        // Only the CORS-safelisted response headers are exposed by default. That is Cache-Control, Content-Language,
+        // Content-Length, Content-Type, Expires, Last-Modified, Pragma.
+        // See https://developer.mozilla.org/en-US/docs/Glossary/CORS-safelisted_response_header
+        h->set("Access-Control-Expose-Headers", "*");
+        // https://stackoverflow.com/a/24689738/17679565
+        // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Credentials
+        h->set("Access-Control-Allow-Credentials", "false");
+        // CORS header for private network access, starting in Chrome 104
+        h->set("Access-Control-Request-Private-Network", "true");
     }
     
     // handle the http options.
@@ -870,9 +946,89 @@ srs_error_t SrsHttpCorsMux::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessag
         }
         return w->final_request();
     }
-    
-    srs_assert(next);
-    return next->serve_http(w, r);
+
+    return next_->serve_http(w, r);
+}
+
+SrsHttpAuthMux::SrsHttpAuthMux(ISrsHttpHandler* h)
+{
+    next_ = h;
+    enabled_ = false;
+}
+
+SrsHttpAuthMux::~SrsHttpAuthMux()
+{
+}
+
+srs_error_t SrsHttpAuthMux::initialize(bool enabled, std::string username, std::string password)
+{
+    enabled_ = enabled;
+    username_ = username;
+    password_ = password;
+
+    return srs_success;
+}
+
+srs_error_t SrsHttpAuthMux::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+{
+    srs_error_t err;
+    if ((err = do_auth(w, r)) != srs_success) {
+        srs_error("do_auth %s", srs_error_desc(err).c_str());
+        srs_freep(err);
+        w->write_header(SRS_CONSTS_HTTP_Unauthorized);
+        return w->final_request();
+    }
+
+    srs_assert(next_);
+    return next_->serve_http(w, r);
+}
+
+srs_error_t SrsHttpAuthMux::do_auth(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+{
+    srs_error_t err = srs_success;
+
+    if (!enabled_) {
+        return err;
+    }
+
+    // We only apply for api starts with /api/ for HTTP API.
+    // We don't apply for other apis such as /rtc/, for which we use http callback.
+    if (r->path().find("/api/") == std::string::npos) {
+        return err;
+    }
+
+    std::string auth = r->header()->get("Authorization");
+    if (auth.empty()) {
+        w->header()->set("WWW-Authenticate", SRS_HTTP_AUTH_SCHEME_BASIC);
+        return srs_error_new(SRS_CONSTS_HTTP_Unauthorized, "empty Authorization");
+    }
+
+    if (!srs_string_contains(auth, SRS_HTTP_AUTH_PREFIX_BASIC)) {
+        return srs_error_new(SRS_CONSTS_HTTP_Unauthorized, "invalid auth %s, should start with %s", auth.c_str(), SRS_HTTP_AUTH_PREFIX_BASIC);
+    }
+
+    std::string token = srs_erase_first_substr(auth, SRS_HTTP_AUTH_PREFIX_BASIC);
+    if (token.empty()) {
+        return srs_error_new(SRS_CONSTS_HTTP_Unauthorized, "empty token from auth %s", auth.c_str());
+    }
+
+    std::string plaintext;
+    if ((err = srs_av_base64_decode(token, plaintext)) != srs_success) {
+        return srs_error_wrap(err, "decode token %s", token.c_str());
+    }
+
+    // The token format must be username:password
+    std::vector<std::string> user_pwd = srs_string_split(plaintext, ":");
+    if (user_pwd.size() != 2) {
+        return srs_error_new(SRS_CONSTS_HTTP_Unauthorized, "invalid token %s", plaintext.c_str());
+    }
+
+    if (username_ != user_pwd[0] || password_ != user_pwd[1]) {
+        w->header()->set("WWW-Authenticate", SRS_HTTP_AUTH_SCHEME_BASIC);
+        return srs_error_new(SRS_CONSTS_HTTP_Unauthorized, "invalid token %s:%s", user_pwd[0].c_str(), user_pwd[1].c_str());
+    }
+
+    return err;
 }
 
 ISrsHttpMessage::ISrsHttpMessage()
@@ -892,29 +1048,41 @@ SrsHttpUri::~SrsHttpUri()
 {
 }
 
-srs_error_t SrsHttpUri::initialize(string _url)
+srs_error_t SrsHttpUri::initialize(string url)
 {
-    schema = host = path = query = "";
+    schema = host = path = query = fragment_ = "";
+    url_ = url;
 
-    url = _url;
-    const char* purl = url.c_str();
-
-    http_parser_url hp_u;
-    int r0;
-    if ((r0 = http_parser_parse_url(purl, url.length(), 0, &hp_u)) != 0){
-        return srs_error_new(ERROR_HTTP_PARSE_URI, "parse url %s failed, code=%d", purl, r0);
+    // Replace the default vhost to a domain like string, or parse failed.
+    string parsing_url = url;
+    size_t pos_default_vhost = url.find("://__defaultVhost__");
+    if (pos_default_vhost != string::npos) {
+        parsing_url = srs_string_replace(parsing_url, "://__defaultVhost__", "://safe.vhost.default.ossrs.io");
     }
 
-    std::string field = get_uri_field(url, &hp_u, UF_SCHEMA);
+    http_parser_url hp_u;
+    http_parser_url_init(&hp_u);
+
+    int r0;
+    if ((r0 = http_parser_parse_url(parsing_url.c_str(), parsing_url.length(), 0, &hp_u)) != 0){
+        return srs_error_new(ERROR_HTTP_PARSE_URI, "parse url %s as %s failed, code=%d", url.c_str(), parsing_url.c_str(), r0);
+    }
+
+    std::string field = get_uri_field(parsing_url, &hp_u, UF_SCHEMA);
     if (!field.empty()){
         schema = field;
     }
 
-    host = get_uri_field(url, &hp_u, UF_HOST);
+    // Restore the default vhost.
+    if (pos_default_vhost == string::npos) {
+        host = get_uri_field(parsing_url, &hp_u, UF_HOST);
+    } else {
+        host = SRS_CONSTS_RTMP_DEFAULT_VHOST;
+    }
 
-    field = get_uri_field(url, &hp_u, UF_PORT);
+    field = get_uri_field(parsing_url, &hp_u, UF_PORT);
     if (!field.empty()) {
-        port = atoi(field.c_str());
+        port = ::atoi(field.c_str());
     }
     if (port <= 0) {
         if (schema == "https") {
@@ -928,10 +1096,11 @@ srs_error_t SrsHttpUri::initialize(string _url)
         }
     }
 
-    path = get_uri_field(url, &hp_u, UF_PATH);
-    query = get_uri_field(url, &hp_u, UF_QUERY);
+    path = get_uri_field(parsing_url, &hp_u, UF_PATH);
+    query = get_uri_field(parsing_url, &hp_u, UF_QUERY);
+    fragment_ = get_uri_field(parsing_url, &hp_u, UF_FRAGMENT);
 
-    username_ = get_uri_field(url, &hp_u, UF_USERINFO);
+    username_ = get_uri_field(parsing_url, &hp_u, UF_USERINFO);
     size_t pos = username_.find(":");
     if (pos != string::npos) {
         password_ = username_.substr(pos+1);
@@ -946,15 +1115,15 @@ void SrsHttpUri::set_schema(std::string v)
     schema = v;
 
     // Update url with new schema.
-    size_t pos = url.find("://");
+    size_t pos = url_.find("://");
     if (pos != string::npos) {
-        url = schema + "://" + url.substr(pos + 3);
+        url_ = schema + "://" + url_.substr(pos + 3);
     }
 }
 
 string SrsHttpUri::get_url()
 {
-    return url;
+    return url_;
 }
 
 string SrsHttpUri::get_schema()
@@ -991,6 +1160,11 @@ string SrsHttpUri::get_query_by_key(std::string key)
     return it->second;
 }
 
+std::string SrsHttpUri::get_fragment()
+{
+    return fragment_;
+}
+
 std::string SrsHttpUri::username()
 {
     return username_;
@@ -1001,7 +1175,7 @@ std::string SrsHttpUri::password()
     return password_;
 }
 
-string SrsHttpUri::get_uri_field(string uri, void* php_u, int ifield)
+string SrsHttpUri::get_uri_field(const string& uri, void* php_u, int ifield)
 {
 	http_parser_url* hp_u = (http_parser_url*)php_u;
 	http_parser_url_fields field = (http_parser_url_fields)ifield;
@@ -1656,6 +1830,9 @@ enum state
   , s_res_HT
   , s_res_HTT
   , s_res_HTTP
+  , s_res_S /* SIP https://www.ietf.org/rfc/rfc3261.html */
+  , s_res_SI /* SIP https://www.ietf.org/rfc/rfc3261.html */
+  , s_res_SIP /* SIP https://www.ietf.org/rfc/rfc3261.html */
   , s_res_http_major
   , s_res_http_dot
   , s_res_http_minor
@@ -1688,6 +1865,9 @@ enum state
   , s_req_http_HTTP
   , s_req_http_I
   , s_req_http_IC
+  , s_req_http_S /* SIP https://www.ietf.org/rfc/rfc3261.html */
+  , s_req_http_SI /* SIP https://www.ietf.org/rfc/rfc3261.html */
+  , s_req_http_SIP /* SIP https://www.ietf.org/rfc/rfc3261.html */
   , s_req_http_major
   , s_req_http_dot
   , s_req_http_minor
@@ -2104,6 +2284,11 @@ reexecute:
           UPDATE_STATE(s_res_or_resp_H);
 
           CALLBACK_NOTIFY(message_begin);
+        } else if (ch == 'S') { /* SIP https://www.ietf.org/rfc/rfc3261.html */
+          parser->type = HTTP_RESPONSE;
+          UPDATE_STATE(s_res_S);
+
+          CALLBACK_NOTIFY(message_begin);
         } else {
           parser->type = HTTP_REQUEST;
           UPDATE_STATE(s_start_req);
@@ -2139,6 +2324,8 @@ reexecute:
 
         if (ch == 'H') {
           UPDATE_STATE(s_res_H);
+        } else if (ch == 'S') { /* SIP https://www.ietf.org/rfc/rfc3261.html */
+          UPDATE_STATE(s_res_S);
         } else {
           SET_ERRNO(HPE_INVALID_CONSTANT);
           goto error;
@@ -2164,6 +2351,24 @@ reexecute:
         break;
 
       case s_res_HTTP:
+        STRICT_CHECK(ch != '/');
+        UPDATE_STATE(s_res_http_major);
+        break;
+
+      /* SIP https://www.ietf.org/rfc/rfc3261.html */
+      case s_res_S:
+        STRICT_CHECK(ch != 'I');
+        UPDATE_STATE(s_res_SI);
+        break;
+
+      /* SIP https://www.ietf.org/rfc/rfc3261.html */
+      case s_res_SI:
+        STRICT_CHECK(ch != 'P');
+        UPDATE_STATE(s_res_SIP);
+        break;
+
+      /* SIP https://www.ietf.org/rfc/rfc3261.html */
+      case s_res_SIP:
         STRICT_CHECK(ch != '/');
         UPDATE_STATE(s_res_http_major);
         break;
@@ -2302,20 +2507,21 @@ reexecute:
         parser->method = (enum http_method) 0;
         parser->index = 1;
         switch (ch) {
-          case 'A': parser->method = HTTP_ACL; break;
-          case 'B': parser->method = HTTP_BIND; break;
+          case 'A': parser->method = HTTP_ACL; /* or ACK */ break;
+          case 'B': parser->method = HTTP_BIND; /* or BYE */ break;
           case 'C': parser->method = HTTP_CONNECT; /* or COPY, CHECKOUT */ break;
           case 'D': parser->method = HTTP_DELETE; break;
           case 'G': parser->method = HTTP_GET; break;
           case 'H': parser->method = HTTP_HEAD; break;
+          case 'I': parser->method = HTTP_INVITE; break; /* SIP https://www.ietf.org/rfc/rfc3261.html */
           case 'L': parser->method = HTTP_LOCK; /* or LINK */ break;
-          case 'M': parser->method = HTTP_MKCOL; /* or MOVE, MKACTIVITY, MERGE, M-SEARCH, MKCALENDAR */ break;
+          case 'M': parser->method = HTTP_MKCOL; /* or MOVE, MKACTIVITY, MERGE, M-SEARCH, MKCALENDAR, MESSAGE */ break;
           case 'N': parser->method = HTTP_NOTIFY; break;
           case 'O': parser->method = HTTP_OPTIONS; break;
           case 'P': parser->method = HTTP_POST;
             /* or PROPFIND|PROPPATCH|PUT|PATCH|PURGE */
             break;
-          case 'R': parser->method = HTTP_REPORT; /* or REBIND */ break;
+          case 'R': parser->method = HTTP_REPORT; /* or REBIND, REGISTER */ break;
           case 'S': parser->method = HTTP_SUBSCRIBE; /* or SEARCH, SOURCE */ break;
           case 'T': parser->method = HTTP_TRACE; break;
           case 'U': parser->method = HTTP_UNLOCK; /* or UNSUBSCRIBE, UNBIND, UNLINK */ break;
@@ -2354,6 +2560,8 @@ reexecute:
             XX(POST,      1, 'A', PATCH)
             XX(POST,      1, 'R', PROPFIND)
             XX(PUT,       2, 'R', PURGE)
+            XX(ACL,       2, 'K', ACK) /* SIP https://www.ietf.org/rfc/rfc3261.html */
+            XX(BIND,      1, 'Y', BYE) /* SIP https://www.ietf.org/rfc/rfc3261.html */
             XX(CONNECT,   1, 'H', CHECKOUT)
             XX(CONNECT,   2, 'P', COPY)
             XX(MKCOL,     1, 'O', MOVE)
@@ -2361,9 +2569,11 @@ reexecute:
             XX(MKCOL,     1, '-', MSEARCH)
             XX(MKCOL,     2, 'A', MKACTIVITY)
             XX(MKCOL,     3, 'A', MKCALENDAR)
+            XX(MERGE,     2, 'S', MESSAGE) /* SIP https://www.ietf.org/rfc/rfc3261.html */
             XX(SUBSCRIBE, 1, 'E', SEARCH)
             XX(SUBSCRIBE, 1, 'O', SOURCE)
             XX(REPORT,    2, 'B', REBIND)
+            XX(REPORT,    2, 'G', REGISTER) /* SIP https://www.ietf.org/rfc/rfc3261.html */
             XX(PROPFIND,  4, 'P', PROPPATCH)
             XX(LOCK,      1, 'I', LINK)
             XX(UNLOCK,    2, 'S', UNSUBSCRIBE)
@@ -2390,6 +2600,11 @@ reexecute:
         MARK(url);
         if (parser->method == HTTP_CONNECT) {
           UPDATE_STATE(s_req_server_start);
+        }
+
+        /* SIP https://www.ietf.org/rfc/rfc3261.html */
+        if (parser->method >= HTTP_REGISTER && parser->method <= HTTP_BYE) {
+            UPDATE_STATE(s_req_path);
         }
 
         UPDATE_STATE(parse_url_char(CURRENT_STATE(), ch));
@@ -2463,6 +2678,9 @@ reexecute:
           case 'H':
             UPDATE_STATE(s_req_http_H);
             break;
+          case 'S': /* SIP https://www.ietf.org/rfc/rfc3261.html */
+            UPDATE_STATE(s_req_http_S); /* SIP https://www.ietf.org/rfc/rfc3261.html */
+            break; /* SIP https://www.ietf.org/rfc/rfc3261.html */
           case 'I':
             if (parser->method == HTTP_SOURCE) {
               UPDATE_STATE(s_req_http_I);
@@ -2501,6 +2719,24 @@ reexecute:
         break;
 
       case s_req_http_HTTP:
+        STRICT_CHECK(ch != '/');
+        UPDATE_STATE(s_req_http_major);
+        break;
+
+      /* SIP https://www.ietf.org/rfc/rfc3261.html */
+      case s_req_http_S:
+        STRICT_CHECK(ch != 'I');
+        UPDATE_STATE(s_req_http_SI);
+        break;
+
+      /* SIP https://www.ietf.org/rfc/rfc3261.html */
+      case s_req_http_SI:
+        STRICT_CHECK(ch != 'P');
+        UPDATE_STATE(s_req_http_SIP);
+        break;
+
+      /* SIP https://www.ietf.org/rfc/rfc3261.html */
+      case s_req_http_SIP:
         STRICT_CHECK(ch != '/');
         UPDATE_STATE(s_req_http_major);
         break;

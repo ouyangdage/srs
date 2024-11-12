@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_PROTOCOL_LOG_HPP
@@ -28,9 +28,12 @@ public:
     virtual SrsContextId generate_id();
     virtual const SrsContextId& get_id();
     virtual const SrsContextId& set_id(const SrsContextId& v);
-public:
+private:
     virtual void clear_cid();
 };
+
+// Set the context id of specified thread, not self.
+extern const SrsContextId& srs_context_set_cid_of(srs_thread_t trd, const SrsContextId& v);
 
 // The context restore stores the context and restore it when done.
 // Usage:
@@ -49,7 +52,7 @@ public:
 class SrsConsoleLog : public ISrsLog
 {
 private:
-    SrsLogLevel level;
+    SrsLogLevel level_;
     bool utc;
 private:
     char* buffer;
@@ -60,11 +63,7 @@ public:
 public:
     virtual srs_error_t initialize();
     virtual void reopen();
-    virtual void verbose(const char* tag, SrsContextId context_id, const char* fmt, ...);
-    virtual void info(const char* tag, SrsContextId context_id, const char* fmt, ...);
-    virtual void trace(const char* tag, SrsContextId context_id, const char* fmt, ...);
-    virtual void warn(const char* tag, SrsContextId context_id, const char* fmt, ...);
-    virtual void error(const char* tag, SrsContextId context_id, const char* fmt, ...);
+    virtual void log(SrsLogLevel level, const char* tag, const SrsContextId& context_id, const char* fmt, va_list args);
 };
 
 // Generate the log header.

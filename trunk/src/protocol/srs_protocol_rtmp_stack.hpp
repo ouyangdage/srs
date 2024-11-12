@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_PROTOCOL_RTMP_HPP
@@ -114,8 +114,8 @@ public:
 // Encode functions for concrete packet to override.
 public:
     // The cid(chunk id) specifies the chunk to send data over.
-    // Generally, each message perfer some cid, for example,
-    // all protocol control messages perfer RTMP_CID_ProtocolControl,
+    // Generally, each message prefer some cid, for example,
+    // all protocol control messages prefer RTMP_CID_ProtocolControl,
     // SrsSetWindowAckSizePacket is protocol control message.
     virtual int get_prefer_cid();
     // The subpacket must override to provide the right message type.
@@ -397,11 +397,14 @@ public:
     // The client ip.
     std::string ip;
 public:
-    // The tcUrl: rtmp://request_vhost:port/app/stream
-    // support pass vhost in query string, such as:
-    //    rtmp://ip:port/app?vhost=request_vhost/stream
-    //    rtmp://ip:port/app...vhost...request_vhost/stream
+    // Support pass vhost in RTMP URL, such as:
+    //    rtmp://VHOST:port/app/stream
+    //    rtmp://ip:port/app/stream?vhost=VHOST
+    //    rtmp://ip:port/app?vhost=VHOST/stream
+    //    rtmp://ip:port/app...vhost...VHOST/stream
+    // While tcUrl is url without stream.
     std::string tcUrl;
+public:
     std::string pageUrl;
     std::string swfUrl;
     double objectEncoding;
@@ -421,6 +424,10 @@ public:
     std::string param;
     // The stream in play/publish
     std::string stream;
+    // User specify the ice-ufrag, the username of ice, for test only.
+    std::string ice_ufrag_;
+    // User specify the ice-pwd, the password of ice, for test only.
+    std::string ice_pwd_;
     // For play live stream,
     // used to specified the stop when exceed the duration.
     // in srs_utime_t.
@@ -470,13 +477,19 @@ public:
 // The rtmp client type.
 enum SrsRtmpConnType
 {
-    SrsRtmpConnUnknown,
-    SrsRtmpConnPlay,
-    SrsRtmpConnFMLEPublish,
-    SrsRtmpConnFlashPublish,
-    SrsRtmpConnHaivisionPublish,
-    SrsRtcConnPlay,
-    SrsRtcConnPublish,
+    SrsRtmpConnUnknown = 0x0000,
+    // All players.
+    SrsRtmpConnPlay = 0x0100,
+    SrsHlsPlay = 0x0101,
+    SrsFlvPlay = 0x0102,
+    SrsRtcConnPlay = 0x0110,
+    SrsSrtConnPlay = 0x0120,
+    // All publishers.
+    SrsRtmpConnFMLEPublish = 0x0200,
+    SrsRtmpConnFlashPublish = 0x0201,
+    SrsRtmpConnHaivisionPublish = 0x0202,
+    SrsRtcConnPublish = 0x0210,
+    SrsSrtConnPublish = 0x0220,
 };
 std::string srs_client_type_string(SrsRtmpConnType type);
 bool srs_client_type_is_publish(SrsRtmpConnType type);
@@ -734,6 +747,10 @@ public:
     // When client type is publish, response with packets:
     // onStatus(NetStream.Publish.Start)
     virtual srs_error_t start_flash_publish(int stream_id);
+    // Response the start publishing message after hooks verified. To stop reconnecting of
+    // OBS when publish failed, we should never send the onStatus(NetStream.Publish.Start)
+    // message before failure caused by hooks. See https://github.com/ossrs/srs/issues/4037
+    virtual srs_error_t start_publishing(int stream_id);
 public:
     // Expect a specified message, drop others util got specified one.
     // @pmsg, user must free it. NULL if not success.
@@ -902,6 +919,8 @@ public:
 public:
     SrsCreateStreamPacket();
     virtual ~SrsCreateStreamPacket();
+public:
+    void set_command_object(SrsAmf0Any* v);
 // Decode functions for concrete packet to override.
 public:
     virtual srs_error_t decode(SrsBuffer* stream);
@@ -976,6 +995,8 @@ public:
 public:
     SrsFMLEStartPacket();
     virtual ~SrsFMLEStartPacket();
+public:
+    void set_command_object(SrsAmf0Any* v);
 // Decode functions for concrete packet to override.
 public:
     virtual srs_error_t decode(SrsBuffer* stream);
@@ -1008,6 +1029,9 @@ public:
 public:
     SrsFMLEStartResPacket(double _transaction_id);
     virtual ~SrsFMLEStartResPacket();
+public:
+    void set_args(SrsAmf0Any* v);
+    void set_command_object(SrsAmf0Any* v);
 // Decode functions for concrete packet to override.
 public:
     virtual srs_error_t decode(SrsBuffer* stream);
@@ -1051,6 +1075,8 @@ public:
 public:
     SrsPublishPacket();
     virtual ~SrsPublishPacket();
+public:
+    void set_command_object(SrsAmf0Any* v);
 // Decode functions for concrete packet to override.
 public:
     virtual srs_error_t decode(SrsBuffer* stream);
@@ -1175,6 +1201,9 @@ public:
 public:
     SrsPlayResPacket();
     virtual ~SrsPlayResPacket();
+public:
+    void set_command_object(SrsAmf0Any* v);
+    void set_desc(SrsAmf0Object* v);
 // Encode functions for concrete packet to override.
 public:
     virtual int get_prefer_cid();
@@ -1198,6 +1227,8 @@ public:
 public:
     SrsOnBWDonePacket();
     virtual ~SrsOnBWDonePacket();
+public:
+    void set_args(SrsAmf0Any* v);
 // Encode functions for concrete packet to override.
 public:
     virtual int get_prefer_cid();
@@ -1226,6 +1257,9 @@ public:
 public:
     SrsOnStatusCallPacket();
     virtual ~SrsOnStatusCallPacket();
+public:
+    void set_args(SrsAmf0Any* v);
+    void set_data(SrsAmf0Object* v);
 // Encode functions for concrete packet to override.
 public:
     virtual int get_prefer_cid();
@@ -1233,65 +1267,6 @@ public:
 protected:
     virtual int get_size();
     virtual srs_error_t encode_packet(SrsBuffer* stream);
-};
-
-// The special packet for the bandwidth test.
-// actually, it's a SrsOnStatusCallPacket, but
-// 1. encode with data field, to send data to client.
-// 2. decode ignore the data field, donot care.
-class SrsBandwidthPacket : public SrsPacket
-{
-public:
-    // Name of command.
-    std::string command_name;
-    // Transaction ID set to 0.
-    double transaction_id;
-    // Command information does not exist. Set to null type.
-    // @remark, never be NULL, an AMF0 null instance.
-    SrsAmf0Any* args; // null
-    // Name-value pairs that describe the response from the server.
-    // 'code','level', 'description' are names of few among such information.
-    // @remark, never be NULL, an AMF0 object instance.
-    SrsAmf0Object* data;
-public:
-    SrsBandwidthPacket();
-    virtual ~SrsBandwidthPacket();
-// Decode functions for concrete packet to override.
-public:
-    virtual srs_error_t decode(SrsBuffer* stream);
-// Encode functions for concrete packet to override.
-public:
-    virtual int get_prefer_cid();
-    virtual int get_message_type();
-protected:
-    virtual int get_size();
-    virtual srs_error_t encode_packet(SrsBuffer* stream);
-// help function for bandwidth packet.
-public:
-    virtual bool is_start_play();
-    virtual bool is_starting_play();
-    virtual bool is_stop_play();
-    virtual bool is_stopped_play();
-    virtual bool is_start_publish();
-    virtual bool is_starting_publish();
-    virtual bool is_stop_publish();
-    virtual bool is_stopped_publish();
-    virtual bool is_finish();
-    virtual bool is_final();
-    static SrsBandwidthPacket* create_start_play();
-    static SrsBandwidthPacket* create_starting_play();
-    static SrsBandwidthPacket* create_playing();
-    static SrsBandwidthPacket* create_stop_play();
-    static SrsBandwidthPacket* create_stopped_play();
-    static SrsBandwidthPacket* create_start_publish();
-    static SrsBandwidthPacket* create_starting_publish();
-    static SrsBandwidthPacket* create_publishing();
-    static SrsBandwidthPacket* create_stop_publish();
-    static SrsBandwidthPacket* create_stopped_publish();
-    static SrsBandwidthPacket* create_finish();
-    static SrsBandwidthPacket* create_final();
-private:
-    virtual SrsBandwidthPacket* set_command(std::string command);
 };
 
 // onStatus data, AMF0 Data
@@ -1308,6 +1283,9 @@ public:
 public:
     SrsOnStatusDataPacket();
     virtual ~SrsOnStatusDataPacket();
+public:
+    void set_data(SrsAmf0Object* v);
+    SrsAmf0Object* get_data();
 // Encode functions for concrete packet to override.
 public:
     virtual int get_prefer_cid();
@@ -1356,6 +1334,8 @@ public:
 public:
     SrsOnMetaDataPacket();
     virtual ~SrsOnMetaDataPacket();
+public:
+    void set_metadata(SrsAmf0Object* v);
 // Decode functions for concrete packet to override.
 public:
     virtual srs_error_t decode(SrsBuffer* stream);

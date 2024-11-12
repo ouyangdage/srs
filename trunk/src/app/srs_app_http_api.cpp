@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_app_http_api.hpp>
@@ -30,6 +30,15 @@ using namespace std;
 #include <srs_protocol_amf0.hpp>
 #include <srs_protocol_utility.hpp>
 #include <srs_app_coworkers.hpp>
+
+#ifdef SRS_VALGRIND
+#include <valgrind/valgrind.h>
+#include <valgrind/memcheck.h>
+#endif
+
+#if defined(__linux__) || defined(SRS_OSX)
+#include <sys/utsname.h>
+#endif
 
 srs_error_t srs_api_response_jsonp(ISrsHttpResponseWriter* w, string callback, string data)
 {
@@ -62,9 +71,8 @@ srs_error_t srs_api_response_jsonp(ISrsHttpResponseWriter* w, string callback, s
 
 srs_error_t srs_api_response_jsonp_code(ISrsHttpResponseWriter* w, string callback, int code)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(code));
     
     return srs_api_response_jsonp(w, callback, obj->dumps());
@@ -72,8 +80,7 @@ srs_error_t srs_api_response_jsonp_code(ISrsHttpResponseWriter* w, string callba
 
 srs_error_t srs_api_response_jsonp_code(ISrsHttpResponseWriter* w, string callback, srs_error_t err)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(srs_error_code(err)));
     
@@ -87,7 +94,9 @@ srs_error_t srs_api_response_json(ISrsHttpResponseWriter* w, string data)
     SrsHttpHeader* h = w->header();
     
     h->set_content_length(data.length());
-    h->set_content_type("application/json");
+    if (h->content_type().empty()) {
+        h->set_content_type("application/json");
+    }
     
     if ((err = w->write((char*)data.data(), (int)data.length())) != srs_success) {
         return srs_error_wrap(err, "write json");
@@ -98,8 +107,7 @@ srs_error_t srs_api_response_json(ISrsHttpResponseWriter* w, string data)
 
 srs_error_t srs_api_response_json_code(ISrsHttpResponseWriter* w, int code)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(code));
     
@@ -108,8 +116,7 @@ srs_error_t srs_api_response_json_code(ISrsHttpResponseWriter* w, int code)
 
 srs_error_t srs_api_response_json_code(ISrsHttpResponseWriter* w, srs_error_t code)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(srs_error_code(code)));
     
@@ -172,12 +179,13 @@ SrsGoApiRoot::~SrsGoApiRoot()
 srs_error_t SrsGoApiRoot::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* urls = SrsJsonAny::object();
     obj->set("urls", urls);
@@ -210,12 +218,13 @@ SrsGoApiApi::~SrsGoApiApi()
 srs_error_t SrsGoApiApi::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* urls = SrsJsonAny::object();
     obj->set("urls", urls);
@@ -236,12 +245,13 @@ SrsGoApiV1::~SrsGoApiV1()
 srs_error_t SrsGoApiV1::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* urls = SrsJsonAny::object();
     obj->set("urls", urls);
@@ -262,6 +272,12 @@ srs_error_t SrsGoApiV1::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r
     urls->set("clusters", SrsJsonAny::str("origin cluster server API"));
     urls->set("perf", SrsJsonAny::str("System performance stat"));
     urls->set("tcmalloc", SrsJsonAny::str("tcmalloc api with params ?page=summary|api"));
+#ifdef SRS_VALGRIND
+    urls->set("valgrind", SrsJsonAny::str("valgrind api with params ?check=full|added|changed|new|quick"));
+#endif
+#ifdef SRS_SIGNAL_API
+    urls->set("signal", SrsJsonAny::str("simulate signal api with params ?signo=SIGHUP|SIGUSR1|SIGUSR2|SIGTERM|SIGQUIT|SIGABRT|SIGINT"));
+#endif
 
     SrsJsonObject* tests = SrsJsonAny::object();
     obj->set("tests", tests);
@@ -285,12 +301,13 @@ SrsGoApiVersion::~SrsGoApiVersion()
 srs_error_t SrsGoApiVersion::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -314,14 +331,15 @@ SrsGoApiSummaries::~SrsGoApiSummaries()
 srs_error_t SrsGoApiSummaries::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
-    srs_api_dump_summaries(obj);
+    srs_api_dump_summaries(obj.get());
     
     return srs_api_response(w, r, obj->dumps());
 }
@@ -337,12 +355,13 @@ SrsGoApiRusages::~SrsGoApiRusages()
 srs_error_t SrsGoApiRusages::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -382,12 +401,13 @@ SrsGoApiSelfProcStats::~SrsGoApiSelfProcStats()
 srs_error_t SrsGoApiSelfProcStats::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -459,12 +479,13 @@ SrsGoApiSystemProcStats::~SrsGoApiSystemProcStats()
 srs_error_t SrsGoApiSystemProcStats::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -498,12 +519,13 @@ SrsGoApiMemInfos::~SrsGoApiMemInfos()
 srs_error_t SrsGoApiMemInfos::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -538,12 +560,13 @@ SrsGoApiAuthors::~SrsGoApiAuthors()
 srs_error_t SrsGoApiAuthors::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -565,12 +588,13 @@ SrsGoApiFeatures::~SrsGoApiFeatures()
 srs_error_t SrsGoApiFeatures::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -633,12 +657,13 @@ SrsGoApiRequests::~SrsGoApiRequests()
 srs_error_t SrsGoApiRequests::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
@@ -688,12 +713,13 @@ srs_error_t SrsGoApiVhosts::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessag
     if (!vid.empty() && (vhost = stat->find_vhost_by_id(vid)) == NULL) {
         return srs_api_response_code(w, r, ERROR_RTMP_VHOST_NOT_FOUND);
     }
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     if (r->is_http_get()) {
         if (!vhost) {
@@ -744,12 +770,13 @@ srs_error_t SrsGoApiStreams::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessa
     if (!sid.empty() && (stream = stat->find_stream(sid)) == NULL) {
         return srs_api_response_code(w, r, ERROR_RTMP_STREAM_NOT_FOUND);
     }
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     if (r->is_http_get()) {
         if (!stream) {
@@ -804,12 +831,13 @@ srs_error_t SrsGoApiClients::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessa
     if (!client_id.empty() && (client = stat->find_client(client_id)) == NULL) {
         return srs_api_response_code(w, r, ERROR_RTMP_CLIENT_NOT_FOUND);
     }
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     obj->set("server", SrsJsonAny::str(stat->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat->service_pid().c_str()));
     
     if (r->is_http_get()) {
         if (!client) {
@@ -827,7 +855,7 @@ srs_error_t SrsGoApiClients::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessa
             }
         } else {
             SrsJsonObject* data = SrsJsonAny::object();
-            obj->set("client", data);;
+            obj->set("client", data);
             
             if ((err = client->dumps(data)) != srs_success) {
                 int code = srs_error_code(err);
@@ -871,6 +899,10 @@ SrsGoApiRaw::~SrsGoApiRaw()
     _srs_config->unsubscribe(this);
 }
 
+extern srs_error_t _srs_reload_err;
+extern SrsReloadState _srs_reload_state;
+extern std::string _srs_reload_id;
+
 srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     srs_error_t err = srs_success;
@@ -878,14 +910,13 @@ srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* 
     std::string rpc = r->query_get("rpc");
     
     // the object to return for request.
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     
     // for rpc=raw, to query the raw api config for http api.
     if (rpc == "raw") {
         // query global scope.
-        if ((err = _srs_config->raw_to_json(obj)) != srs_success) {
+        if ((err = _srs_config->raw_to_json(obj.get())) != srs_success) {
             int code = srs_error_code(err);
             srs_error_reset(err);
             return srs_api_response_code(w, r, code);
@@ -901,8 +932,8 @@ srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* 
     
     //////////////////////////////////////////////////////////////////////////
     // the rpc is required.
-    // the allowd rpc method check.
-    if (rpc.empty() || rpc != "reload") {
+    // the allowed rpc method check.
+    if (rpc.empty() || (rpc != "reload" && rpc != "reload-fetch")) {
         return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW);
     }
     
@@ -914,6 +945,16 @@ srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* 
         
         server->on_signal(SRS_SIGNAL_RELOAD);
         return srs_api_response_code(w, r, ERROR_SUCCESS);
+    } else if (rpc == "reload-fetch") {
+        SrsJsonObject* data = SrsJsonAny::object();
+        obj->set("data", data);
+
+        data->set("err", SrsJsonAny::integer(srs_error_code(_srs_reload_err)));
+        data->set("msg", SrsJsonAny::str(srs_error_summary(_srs_reload_err).c_str()));
+        data->set("state", SrsJsonAny::integer(_srs_reload_state));
+        data->set("rid", SrsJsonAny::str(_srs_reload_id.c_str()));
+
+        return srs_api_response(w, r, obj->dumps());
     }
     
     return err;
@@ -939,8 +980,7 @@ SrsGoApiClusters::~SrsGoApiClusters()
 
 srs_error_t SrsGoApiClusters::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     SrsJsonObject* data = SrsJsonAny::object();
@@ -1007,8 +1047,7 @@ srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     }
 
     // By default, response the json style response.
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
 
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
     SrsJsonObject* data = SrsJsonAny::object();
@@ -1062,149 +1101,274 @@ srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
 }
 #endif
 
-SrsHttpApi::SrsHttpApi(bool https, ISrsResourceManager* cm, srs_netfd_t fd, SrsHttpServeMux* m, string cip, int port)
+#ifdef SRS_VALGRIND
+SrsGoApiValgrind::SrsGoApiValgrind()
 {
-    // Create a identify for this client.
-    _srs_context->set_id(_srs_context->generate_id());
-
-    manager = cm;
-    skt = new SrsTcpConnection(fd);
-
-    if (https) {
-        ssl = new SrsSslConnection(skt);
-        conn = new SrsHttpConn(this, ssl, m, cip, port);
-    } else {
-        ssl = NULL;
-        conn = new SrsHttpConn(this, skt, m, cip, port);
-    }
-
-    _srs_config->subscribe(this);
+    trd_ = NULL;
 }
 
-SrsHttpApi::~SrsHttpApi()
+SrsGoApiValgrind::~SrsGoApiValgrind()
 {
-    _srs_config->unsubscribe(this);
-
-    srs_freep(conn);
-    srs_freep(ssl);
-    srs_freep(skt);
+    srs_freep(trd_);
 }
 
-srs_error_t SrsHttpApi::on_start()
+srs_error_t SrsGoApiValgrind::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
 {
     srs_error_t err = srs_success;
 
-    if ((err = conn->set_jsonp(true)) != srs_success) {
-        return srs_error_wrap(err, "set jsonp");
-    }
-
-    if (ssl) {
-        srs_utime_t starttime = srs_update_system_time();
-        string crt_file = _srs_config->get_https_api_ssl_cert();
-        string key_file = _srs_config->get_https_api_ssl_key();
-        if ((err = ssl->handshake(key_file, crt_file)) != srs_success) {
-            return srs_error_wrap(err, "handshake");
-        }
-
-        int cost = srsu2msi(srs_update_system_time() - starttime);
-        srs_trace("https: api server done, use key %s and cert %s, cost=%dms",
-            key_file.c_str(), crt_file.c_str(), cost);
-    }
-
-    return err;
-}
-
-srs_error_t SrsHttpApi::on_http_message(ISrsHttpMessage* r, SrsHttpResponseWriter* w)
-{
-    srs_error_t err = srs_success;
-
-    // After parsed the message, set the schema to https.
-    if (ssl) {
-        SrsHttpMessage* hm = dynamic_cast<SrsHttpMessage*>(r);
-        hm->set_https(true);
-    }
-
-    // TODO: For each API session, we use short-term HTTP connection.
-    //SrsHttpHeader* hdr = w->header();
-    //hdr->set("Connection", "Close");
-
-    return err;
-}
-
-srs_error_t SrsHttpApi::on_message_done(ISrsHttpMessage* r, SrsHttpResponseWriter* w)
-{
-    srs_error_t err = srs_success;
-
-    // read all rest bytes in request body.
-    char buf[SRS_HTTP_READ_CACHE_BYTES];
-    ISrsHttpResponseReader* br = r->body_reader();
-    while (!br->eof()) {
-        if ((err = br->read(buf, SRS_HTTP_READ_CACHE_BYTES, NULL)) != srs_success) {
-            return srs_error_wrap(err, "read response");
+    if (!trd_) {
+        trd_ = new SrsSTCoroutine("valgrind", this, _srs_context->get_id());
+        if ((err = trd_->start()) != srs_success) {
+            return srs_error_wrap(err, "start");
         }
     }
 
-    return err;
-}
+    string check = r->query_get("check");
+    srs_trace("query check=%s", check.c_str());
 
-srs_error_t SrsHttpApi::on_conn_done(srs_error_t r0)
-{
-    // Because we use manager to manage this object,
-    // not the http connection object, so we must remove it here.
-    manager->remove(this);
-
-    // For HTTP-API timeout, we think it's done successfully,
-    // because there may be no request or response for HTTP-API.
-    if (srs_error_code(r0) == ERROR_SOCKET_TIMEOUT) {
-        srs_freep(r0);
-        return srs_success;
+    // Must be full|added|changed|new|quick, set to full for other values.
+    if (check != "full" && check != "added" && check != "changed" && check != "new" && check != "quick") {
+        srs_warn("force set check=%s to full", check.c_str());
+        check = "full";
     }
 
-    return r0;
-}
+    // By default, response the json style response.
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
 
-std::string SrsHttpApi::desc()
-{
-    if (ssl) {
-        return "HttpsConn";
+    obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
+
+    SrsJsonObject* res = SrsJsonAny::object();
+    res->set("check", SrsJsonAny::str(check.c_str()));
+    res->set("help", SrsJsonAny::str("?check=full|added|changed|new|quick"));
+    res->set("see", SrsJsonAny::str("https://valgrind.org/docs/manual/mc-manual.html"));
+    obj->set("data", res);
+
+    // Does a memory check later.
+    if (check == "full") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_LEAK_CHECK"));
+    } else if (check == "quick") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_QUICK_LEAK_CHECK"));
+    } else if (check == "added") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_ADDED_LEAK_CHECK"));
+    } else if (check == "changed") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_CHANGED_LEAK_CHECK"));
+    } else if (check == "new") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_NEW_LEAK_CHECK"));
     }
-    return "HttpConn";
+    task_ = check;
+
+    return srs_api_response(w, r, obj->dumps());
 }
 
-void SrsHttpApi::remark(int64_t* in, int64_t* out)
-{
-    conn->remark(in, out);
-}
-
-srs_error_t SrsHttpApi::on_reload_http_api_crossdomain()
-{
-    bool v = _srs_config->get_http_api_crossdomain();
-    return conn->set_crossdomain_enabled(v);
-}
-
-srs_error_t SrsHttpApi::start()
+srs_error_t SrsGoApiValgrind::cycle()
 {
     srs_error_t err = srs_success;
 
-    bool v = _srs_config->get_http_api_crossdomain();
-    if ((err = conn->set_crossdomain_enabled(v)) != srs_success) {
-        return srs_error_wrap(err, "set cors=%d", v);
+    while (true) {
+        if ((err = trd_->pull()) != srs_success) {
+            return srs_error_wrap(err, "pull");
+        }
+
+        std::string check = task_;
+        task_ = "";
+
+        if (!check.empty()) {
+            srs_trace("do memory check=%s", check.c_str());
+        }
+
+        if (check == "full") {
+            VALGRIND_DO_LEAK_CHECK;
+        } else if (check == "quick") {
+            VALGRIND_DO_QUICK_LEAK_CHECK;
+        } else if (check == "added") {
+            VALGRIND_DO_ADDED_LEAK_CHECK;
+        } else if (check == "changed") {
+            VALGRIND_DO_CHANGED_LEAK_CHECK;
+        } else if (check == "new") {
+            VALGRIND_DO_NEW_LEAK_CHECK;
+        }
+
+        srs_usleep(3 * SRS_UTIME_SECONDS);
     }
 
-    if ((err = skt->initialize()) != srs_success) {
-        return srs_error_wrap(err, "init socket");
+    return err;
+}
+#endif
+
+#ifdef SRS_SIGNAL_API
+SrsGoApiSignal::SrsGoApiSignal()
+{
+}
+
+SrsGoApiSignal::~SrsGoApiSignal()
+{
+}
+
+srs_error_t SrsGoApiSignal::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+{
+    std::string signal = r->query_get("signo");
+    srs_trace("query signo=%s", signal.c_str());
+
+    int signo = SIGINT;
+    if (signal == "SIGHUP") {
+        signo = SRS_SIGNAL_RELOAD;
+    } else if (signal == "SIGUSR1") {
+        signo = SRS_SIGNAL_REOPEN_LOG;
+    } else if (signal == "SIGUSR2") {
+        signo = SRS_SIGNAL_UPGRADE;
+    } else if (signal == "SIGTERM") {
+        signo = SRS_SIGNAL_FAST_QUIT;
+    } else if (signal == "SIGQUIT") {
+        signo = SRS_SIGNAL_GRACEFULLY_QUIT;
+    } else if (signal == "SIGABRT") {
+        signo = SRS_SIGNAL_ASSERT_ABORT;
     }
 
-    return conn->start();
-}
+    _srs_hybrid->srs()->instance()->on_signal(signo);
 
-string SrsHttpApi::remote_ip()
+    // By default, response the json style response.
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
+    obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
+
+    SrsJsonObject* res = SrsJsonAny::object();
+    res->set("signal", SrsJsonAny::str(signal.c_str()));
+    res->set("help", SrsJsonAny::str("?signo=SIGHUP|SIGUSR1|SIGUSR2|SIGTERM|SIGQUIT|SIGABRT|SIGINT"));
+    res->set("signo", SrsJsonAny::integer(signo));
+    obj->set("data", res);
+
+    return srs_api_response(w, r, obj->dumps());
+}
+#endif
+
+SrsGoApiMetrics::SrsGoApiMetrics()
 {
-    return conn->remote_ip();
+    enabled_ = _srs_config->get_exporter_enabled();
+    label_ = _srs_config->get_exporter_label();
+    tag_ = _srs_config->get_exporter_tag();
 }
 
-const SrsContextId& SrsHttpApi::get_id()
+SrsGoApiMetrics::~SrsGoApiMetrics()
 {
-    return conn->get_id();
 }
 
+srs_error_t SrsGoApiMetrics::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+{
+    // whether enabled the HTTP Metrics API.
+    if (!enabled_) {
+        return srs_api_response_code(w, r, ERROR_EXPORTER_DISABLED);
+    }
+
+    /*
+     * node_uname gauge
+     * build_info gauge
+     * cpu gauge
+     * memory gauge
+     * send_bytes_total counter
+     * receive_bytes_total counter
+     * streams gauge
+     * clients gauge
+     * clients_total counter
+     * error counter
+    */
+
+    SrsStatistic* stat = SrsStatistic::instance();
+    std::stringstream ss;
+
+    #if defined(__linux__) || defined(SRS_OSX)
+        // Get system info
+        utsname* system_info = srs_get_system_uname_info();
+        ss << "# HELP srs_node_uname_info Labeled system information as provided by the uname system call.\n"
+            << "# TYPE srs_node_uname_info gauge\n"
+            << "srs_node_uname_info{"
+                << "sysname=\"" << system_info->sysname << "\","
+                << "nodename=\"" << system_info->nodename << "\","
+                << "release=\"" << system_info->release << "\","
+                << "version=\"" << system_info->version << "\","
+                << "machine=\"" << system_info->machine << "\""
+            << "} 1\n";
+    #endif
+
+    // Build info from Config.
+    ss << "# HELP srs_build_info A metric with a constant '1' value labeled by build_date, version from which SRS was built.\n"
+        << "# TYPE srs_build_info gauge\n"
+        << "srs_build_info{"
+            << "server=\"" << stat->server_id() << "\","
+            << "service=\"" << stat->service_id() << "\","
+            << "pid=\"" << stat->service_pid() << "\","
+            << "build_date=\"" << SRS_BUILD_DATE << "\","
+            << "major=\"" << VERSION_MAJOR << "\","
+            << "version=\"" << RTMP_SIG_SRS_VERSION << "\","
+            << "code=\"" << RTMP_SIG_SRS_CODE<< "\"";
+    if (!label_.empty()) ss << ",label=\"" << label_ << "\"";
+    if (!tag_.empty()) ss << ",tag=\"" << tag_ << "\"";
+    ss << "} 1\n";
+
+    // Get ProcSelfStat
+    SrsProcSelfStat* u = srs_get_self_proc_stat();
+
+    // The cpu of proc used.
+    ss << "# HELP srs_cpu_percent SRS cpu used percent.\n"
+       << "# TYPE srs_cpu_percent gauge\n"
+       << "srs_cpu_percent "
+       << u->percent * 100
+       << "\n";
+
+    // The memory of proc used.(MBytes)
+    int memory = (int)(u->rss * 4);
+    ss << "# HELP srs_memory SRS memory used.\n"
+       << "# TYPE srs_memory gauge\n"
+       << "srs_memory "
+       << memory
+       << "\n";
+
+    // Dump metrics by statistic.
+    int64_t send_bytes, recv_bytes, nstreams, nclients, total_nclients, nerrs;
+    stat->dumps_metrics(send_bytes, recv_bytes, nstreams, nclients, total_nclients, nerrs);
+
+    // The total of bytes sent.
+    ss << "# HELP srs_send_bytes_total SRS total sent bytes.\n"
+       << "# TYPE srs_send_bytes_total counter\n"
+       << "srs_send_bytes_total "
+       << send_bytes
+       << "\n";
+
+    // The total of bytes received.
+    ss << "# HELP srs_receive_bytes_total SRS total received bytes.\n"
+       << "# TYPE srs_receive_bytes_total counter\n"
+       << "srs_receive_bytes_total "
+       << recv_bytes
+       << "\n";
+
+    // Current number of online streams.
+    ss << "# HELP srs_streams The number of SRS concurrent streams.\n"
+       << "# TYPE srs_streams gauge\n"
+       << "srs_streams "
+       << nstreams
+       << "\n";
+
+    // Current number of online clients.
+    ss << "# HELP srs_clients The number of SRS concurrent clients.\n"
+       << "# TYPE srs_clients gauge\n"
+       << "srs_clients "
+       << nclients
+       << "\n";
+
+    // The total of clients connections.
+    ss << "# HELP srs_clients_total The total counts of SRS clients.\n"
+       << "# TYPE srs_clients_total counter\n"
+       << "srs_clients_total "
+       << total_nclients
+       << "\n";
+
+    // The total of clients errors.
+    ss << "# HELP srs_clients_errs_total The total errors of SRS clients.\n"
+       << "# TYPE srs_clients_errs_total counter\n"
+       << "srs_clients_errs_total "
+       << nerrs
+       << "\n";
+
+    w->header()->set_content_type("text/plain; charset=utf-8");
+
+    return srs_api_response(w, r, ss.str());
+}

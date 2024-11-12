@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_utest.hpp>
@@ -17,7 +17,11 @@
 #include <string>
 using namespace std;
 
+#include <sys/types.h>
+#include <sys/mman.h>
+
 #ifdef SRS_SRT
+#include <srt/srt.h>
 #include <srs_app_srt_server.hpp>
 #endif
 
@@ -35,8 +39,20 @@ ISrsContext* _srs_context = NULL;
 SrsConfig* _srs_config = NULL;
 SrsServer* _srs_server = NULL;
 bool _srs_in_docker = false;
+bool _srs_config_by_env = false;
+
+// The binary name of SRS.
+const char* _srs_binary = NULL;
 
 #include <srs_app_st.hpp>
+
+#ifdef SRS_SRT
+static void srs_srt_utest_null_log_handler(void* opaque, int level, const char* file, int line,
+                                           const char* area, const char* message)
+{
+    // srt null log handler, do no print any log.
+}
+#endif
 
 // Initialize global settings.
 srs_error_t prepare_main() {
@@ -51,7 +67,7 @@ srs_error_t prepare_main() {
     }
 
     srs_freep(_srs_log);
-    _srs_log = new MockEmptyLog(SrsLogLevelDisabled);
+    _srs_log = new MockEmptyLog(SrsLogLevelError);
 
     if ((err = _srs_rtc_dtls_certificate->initialize()) != srs_success) {
         return srs_error_wrap(err, "rtc dtls certificate initialize");
@@ -61,6 +77,13 @@ srs_error_t prepare_main() {
     _srs_context = new SrsThreadContext();
 
 #ifdef SRS_SRT
+    if ((err = srs_srt_log_initialize()) != srs_success) {
+        return srs_error_wrap(err, "srt log initialize");
+    }
+
+    // Prevent the output of srt logs in utest.
+    srt_setloghandler(NULL, srs_srt_utest_null_log_handler);
+
     _srt_eventloop = new SrsSrtEventLoop();
     if ((err = _srt_eventloop->initialize()) != srs_success) {
         return srs_error_wrap(err, "srt poller initialize");
@@ -78,6 +101,8 @@ srs_error_t prepare_main() {
 GTEST_API_ int main(int argc, char **argv) {
     srs_error_t err = srs_success;
 
+    _srs_binary = argv[0];
+
     if ((err = prepare_main()) != srs_success) {
         fprintf(stderr, "Failed, %s\n", srs_error_desc(err).c_str());
 
@@ -87,12 +112,14 @@ GTEST_API_ int main(int argc, char **argv) {
     }
 
     testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    int r0 = RUN_ALL_TESTS();
+
+    return r0;
 }
 
 MockEmptyLog::MockEmptyLog(SrsLogLevel l)
 {
-    level = l;
+    level_ = l;
 }
 
 MockEmptyLog::~MockEmptyLog()
@@ -189,5 +216,41 @@ VOID TEST(SampleTest, ContextTest)
     static std::map<int, MockSrsContextId> cache;
     cache[0] = cid;
     cache[0] = cid;
+}
+
+MockProtectedBuffer::MockProtectedBuffer() : raw_memory_(NULL), size_(0), data_(NULL)
+{
+}
+
+MockProtectedBuffer::~MockProtectedBuffer()
+{
+    if (size_ && raw_memory_) {
+        long page_size = sysconf(_SC_PAGESIZE);
+        munmap(raw_memory_, page_size * 2);
+    }
+}
+
+int MockProtectedBuffer::alloc(int size)
+{
+    srs_assert(!raw_memory_);
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (size >= page_size) return -1;
+
+    char* data = (char*)mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (data == MAP_FAILED) {
+        return -1;
+    }
+
+    size_ = size;
+    raw_memory_ = data;
+    data_ = data + page_size - size;
+
+    int r0 = mprotect(data + page_size, page_size, PROT_NONE);
+    if (r0 < 0) {
+        return r0;
+    }
+
+    return 0;
 }
 

@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_protocol_rtmp_conn.hpp>
@@ -18,9 +18,8 @@ using namespace std;
 
 SrsBasicRtmpClient::SrsBasicRtmpClient(string r, srs_utime_t ctm, srs_utime_t stm)
 {
-    clk = new SrsWallClock();
-    kbps = new SrsKbps(clk);
-    
+    kbps = new SrsNetworkKbps();
+
     url = r;
     connect_timeout = ctm;
     stream_timeout = stm;
@@ -39,8 +38,15 @@ SrsBasicRtmpClient::~SrsBasicRtmpClient()
 {
     close();
     srs_freep(kbps);
-    srs_freep(clk);
     srs_freep(req);
+}
+
+SrsAmf0Object* SrsBasicRtmpClient::extra_args()
+{
+    if (req->args == NULL) {
+        req->args = SrsAmf0Any::object();
+    }
+    return req->args;
 }
 
 srs_error_t SrsBasicRtmpClient::connect()
@@ -52,7 +58,7 @@ srs_error_t SrsBasicRtmpClient::connect()
     transport = new SrsTcpClient(req->host, req->port, srs_utime_t(connect_timeout));
     client = new SrsRtmpClient(transport);
     kbps->set_io(transport, transport);
-    
+
     if ((err = transport->connect()) != srs_success) {
         close();
         return srs_error_wrap(err, "connect");
@@ -91,13 +97,8 @@ srs_error_t SrsBasicRtmpClient::do_connect_app(string local_ip, bool debug)
 {
     srs_error_t err = srs_success;
     
-    // args of request takes the srs info.
-    if (req->args == NULL) {
-        req->args = SrsAmf0Any::object();
-    }
-    
     // notify server the edge identity,
-    SrsAmf0Object* data = req->args;
+    SrsAmf0Object* data = extra_args();
     data->set("srs_sig", SrsAmf0Any::str(RTMP_SIG_SRS_KEY));
     data->set("srs_server", SrsAmf0Any::str(RTMP_SIG_SRS_SERVER));
     data->set("srs_license", SrsAmf0Any::str(RTMP_SIG_SRS_LICENSE));
@@ -113,7 +114,7 @@ srs_error_t SrsBasicRtmpClient::do_connect_app(string local_ip, bool debug)
     // generate the tcUrl
     std::string param = "";
     std::string target_vhost = req->vhost;
-    std::string tc_url = srs_generate_tc_url(req->host, req->vhost, req->app, req->port);
+    std::string tc_url = srs_generate_tc_url("rtmp", req->host, req->vhost, req->app, req->port);
     
     // replace the tcUrl in request,
     // which will replace the tc_url in client.connect_app().
@@ -168,32 +169,32 @@ srs_error_t SrsBasicRtmpClient::play(int chunk_size, bool with_vhost, std::strin
     return err;
 }
 
-void SrsBasicRtmpClient::kbps_sample(const char* label, int64_t age)
+void SrsBasicRtmpClient::kbps_sample(const char* label, srs_utime_t age)
 {
     kbps->sample();
-    
+
     int sr = kbps->get_send_kbps();
     int sr30s = kbps->get_send_kbps_30s();
     int sr5m = kbps->get_send_kbps_5m();
     int rr = kbps->get_recv_kbps();
     int rr30s = kbps->get_recv_kbps_30s();
     int rr5m = kbps->get_recv_kbps_5m();
-    
-    srs_trace("<- %s time=%" PRId64 ", okbps=%d,%d,%d, ikbps=%d,%d,%d", label, age, sr, sr30s, sr5m, rr, rr30s, rr5m);
+
+    srs_trace("<- %s time=%" PRId64 ", okbps=%d,%d,%d, ikbps=%d,%d,%d", label, srsu2ms(age), sr, sr30s, sr5m, rr, rr30s, rr5m);
 }
 
-void SrsBasicRtmpClient::kbps_sample(const char* label, int64_t age, int msgs)
+void SrsBasicRtmpClient::kbps_sample(const char* label, srs_utime_t age, int msgs)
 {
     kbps->sample();
-    
+
     int sr = kbps->get_send_kbps();
     int sr30s = kbps->get_send_kbps_30s();
     int sr5m = kbps->get_send_kbps_5m();
     int rr = kbps->get_recv_kbps();
     int rr30s = kbps->get_recv_kbps_30s();
     int rr5m = kbps->get_recv_kbps_5m();
-    
-    srs_trace("<- %s time=%" PRId64 ", msgs=%d, okbps=%d,%d,%d, ikbps=%d,%d,%d", label, age, msgs, sr, sr30s, sr5m, rr, rr30s, rr5m);
+
+    srs_trace("<- %s time=%" PRId64 ", msgs=%d, okbps=%d,%d,%d, ikbps=%d,%d,%d", label, srsu2ms(age), msgs, sr, sr30s, sr5m, rr, rr30s, rr5m);
 }
 
 int SrsBasicRtmpClient::sid()

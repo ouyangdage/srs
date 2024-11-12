@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_protocol_utility.hpp>
@@ -24,6 +24,7 @@ using namespace std;
 #include <srs_protocol_rtmp_stack.hpp>
 #include <srs_protocol_io.hpp>
 
+#include <limits.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -41,94 +42,91 @@ using namespace std;
 #include <srs_kernel_log.hpp>
 #include <srs_kernel_utility.hpp>
 #include <srs_protocol_http_stack.hpp>
-
-/**
- * resolve the vhost in query string
- * @pram vhost, update the vhost if query contains the vhost.
- * @param app, may contains the vhost in query string format:
- *   app?vhost=request_vhost
- *   app...vhost...request_vhost
- * @param param, the query, for example, ?vhost=xxx
- */
-void srs_vhost_resolve(string& vhost, string& app, string& param)
-{
-    // get original param
-    size_t pos = 0;
-    if ((pos = app.find("?")) != std::string::npos) {
-        param = app.substr(pos);
-    }
-    
-    // filter tcUrl
-    app = srs_string_replace(app, ",", "?");
-    app = srs_string_replace(app, "...", "?");
-    app = srs_string_replace(app, "&&", "?");
-    app = srs_string_replace(app, "&", "?");
-    app = srs_string_replace(app, "=", "?");
-    
-    if (srs_string_ends_with(app, "/_definst_")) {
-        app = srs_erase_last_substr(app, "/_definst_");
-    }
-    
-    if ((pos = app.find("?")) != std::string::npos) {
-        std::string query = app.substr(pos + 1);
-        app = app.substr(0, pos);
-        
-        if ((pos = query.find("vhost?")) != std::string::npos) {
-            query = query.substr(pos + 6);
-            if (!query.empty()) {
-                vhost = query;
-            }
-        }
-    }
-
-    // vhost with params.
-    if ((pos = vhost.find("?")) != std::string::npos) {
-        vhost = vhost.substr(0, pos);
-    }
-    
-    /* others */
-}
+#include <srs_core_autofree.hpp>
 
 void srs_discovery_tc_url(string tcUrl, string& schema, string& host, string& vhost, string& app, string& stream, int& port, string& param)
 {
-    size_t pos = std::string::npos;
-    std::string url = tcUrl;
-    
-    if ((pos = url.find("://")) != std::string::npos) {
-        schema = url.substr(0, pos);
-        url = url.substr(schema.length() + 3);
-        srs_info("discovery schema=%s", schema.c_str());
-    }
-    
-    if ((pos = url.find("/")) != std::string::npos) {
-        host = url.substr(0, pos);
-        url = url.substr(host.length() + 1);
-        srs_info("discovery host=%s", host.c_str());
-    }
-    
-    port = SRS_CONSTS_RTMP_DEFAULT_PORT;
-    if (schema == "https") {
-        port = SRS_DEFAULT_HTTPS_PORT;
+    // For compatibility, transform
+    //      rtmp://ip/app...vhost...VHOST/stream
+    // to typical format:
+    //      rtmp://ip/app?vhost=VHOST/stream
+    string fullUrl = srs_string_replace(tcUrl, "...vhost...", "?vhost=");
+
+    // Standard URL is:
+    //      rtmp://ip/app/app2/stream?k=v
+    // Where after last slash is stream.
+    fullUrl += stream.empty() ? "/" : (stream.at(0) == '/' ? stream : "/" + stream);
+    fullUrl += param.empty() ? "" : (param.at(0) == '?' ? param : "?" + param);
+
+    // First, we covert the FMLE URL to standard URL:
+    //      rtmp://ip/app/app2?k=v/stream , or:
+    //      rtmp://ip/app/app2#k=v/stream
+    size_t pos_query = fullUrl.find_first_of("?#");
+    size_t pos_rslash = fullUrl.rfind("/");
+    if (pos_rslash != string::npos && pos_query != string::npos && pos_query < pos_rslash) {
+        fullUrl = fullUrl.substr(0, pos_query) // rtmp://ip/app/app2
+                  + fullUrl.substr(pos_rslash) // /stream
+                  + fullUrl.substr(pos_query, pos_rslash - pos_query); // ?k=v
     }
 
-    if ((pos = host.find(":")) != std::string::npos) {
-        srs_parse_hostport(host, host, port);
-        srs_info("discovery host=%s, port=%d", host.c_str(), port);
+    // Remove the _definst_ of FMLE URL.
+    if (fullUrl.find("/_definst_") != string::npos) {
+        fullUrl = srs_string_replace(fullUrl, "/_definst_", "");
     }
-    
-    if (url.empty()) {
-        app = SRS_CONSTS_RTMP_DEFAULT_APP;
-    } else {
-        app = url;
+
+    // Parse the standard URL.
+    SrsHttpUri uri;
+    srs_error_t err = srs_success;
+    if ((err = uri.initialize(fullUrl)) != srs_success) {
+        srs_warn("Ignore parse url=%s err %s", fullUrl.c_str(), srs_error_desc(err).c_str());
+        srs_freep(err);
+        return;
     }
-    
-    vhost = host;
-    srs_vhost_resolve(vhost, app, param);
-    srs_vhost_resolve(vhost, stream, param);
-    
-    // Ignore when the param only contains the default vhost.
-    if (param == "?vhost=" SRS_CONSTS_RTMP_DEFAULT_VHOST) {
+
+    schema = uri.get_schema();
+    host = uri.get_host();
+    port = uri.get_port();
+    stream = srs_path_basename(uri.get_path());
+    param = uri.get_query().empty() ? "" : "?" + uri.get_query();
+    param += uri.get_fragment().empty() ? "" : "#" + uri.get_fragment();
+
+    // Parse app without the prefix slash.
+    app = srs_path_dirname(uri.get_path());
+    if (!app.empty() && app.at(0) == '/') app = app.substr(1);
+    if (app.empty()) app = SRS_CONSTS_RTMP_DEFAULT_APP;
+
+    // Try to parse vhost from query, or use host if not specified.
+    string vhost_in_query = uri.get_query_by_key("vhost");
+    if (vhost_in_query.empty()) vhost_in_query = uri.get_query_by_key("domain");
+    if (!vhost_in_query.empty() && vhost_in_query != SRS_CONSTS_RTMP_DEFAULT_VHOST) vhost = vhost_in_query;
+    if (vhost.empty()) vhost = host;
+
+    // Only one param, the default vhost, clear it.
+    if (param.find("&") == string::npos && vhost_in_query == SRS_CONSTS_RTMP_DEFAULT_VHOST) {
         param = "";
+    }
+}
+
+void srs_guess_stream_by_app(string& app, string& param, string& stream)
+{
+    size_t pos = std::string::npos;
+
+    // Extract stream from app, if contains slash.
+    if ((pos = app.find("/")) != std::string::npos) {
+        stream = app.substr(pos + 1);
+        app = app.substr(0, pos);
+
+        if ((pos = stream.find("?")) != std::string::npos) {
+            param = stream.substr(pos);
+            stream = stream.substr(0, pos);
+        }
+        return;
+    }
+
+    // Extract stream from param, if contains slash.
+    if ((pos = param.find("/")) != std::string::npos) {
+        stream = param.substr(pos + 1);
+        param = param.substr(0, pos);
     }
 }
 
@@ -185,17 +183,17 @@ long srs_random()
     return random();
 }
 
-string srs_generate_tc_url(string host, string vhost, string app, int port)
+string srs_generate_tc_url(string schema, string host, string vhost, string app, int port)
 {
-    string tcUrl = "rtmp://";
+    string tcUrl = schema + "://";
     
     if (vhost == SRS_CONSTS_RTMP_DEFAULT_VHOST) {
-        tcUrl += host;
+        tcUrl += host.empty() ? SRS_CONSTS_RTMP_DEFAULT_VHOST : host;
     } else {
         tcUrl += vhost;
     }
     
-    if (port != SRS_CONSTS_RTMP_DEFAULT_PORT) {
+    if (port && port != SRS_CONSTS_RTMP_DEFAULT_PORT) {
         tcUrl += ":" + srs_int2str(port);
     }
     
@@ -241,8 +239,8 @@ string srs_generate_stream_with_query(string host, string vhost, string stream, 
         }
     }
     
-    // Remove the start & when param is empty.
-    query = srs_string_trim_start(query, "&");
+    // Remove the start & and ? when param is empty.
+    query = srs_string_trim_start(query, "&?");
 
     // Prefix query with ?.
     if (!query.empty() && !srs_string_starts_with(query, "?")) {
@@ -334,10 +332,9 @@ string srs_generate_stream_url(string vhost, string app, string stream)
     if (SRS_CONSTS_RTMP_DEFAULT_VHOST != vhost){
         url += vhost;
     }
-    url += "/";
-    url += app;
-    url += "/";
-    url += stream;
+    url += "/" + app;
+    // Note that we ignore any extension.
+    url += "/" + srs_path_filename(stream);
     
     return url;
 }
@@ -715,13 +712,6 @@ void retrieve_local_ips()
 {
     vector<SrsIPAddress*>& ips = _srs_system_ips;
 
-    // Release previous IPs.
-    for (int i = 0; i < (int)ips.size(); i++) {
-        SrsIPAddress* ip = ips[i];
-        srs_freep(ip);
-    }
-    ips.clear();
-
     // Get the addresses.
     ifaddrs* ifap;
     if (getifaddrs(&ifap) == -1) {
@@ -909,5 +899,112 @@ string srs_get_system_hostname()
 
     _srs_system_hostname = std::string(buf);
     return _srs_system_hostname;
+}
+
+srs_error_t srs_ioutil_read_all(ISrsReader* in, std::string& content)
+{
+    srs_error_t err = srs_success;
+
+    // Cache to read, it might cause coroutine switch, so we use local cache here.
+    SrsUniquePtr<char[]> buf(new char[SRS_HTTP_READ_CACHE_BYTES]);
+
+    // Whatever, read util EOF.
+    while (true) {
+        ssize_t nb_read = 0;
+        if ((err = in->read(buf.get(), SRS_HTTP_READ_CACHE_BYTES, &nb_read)) != srs_success) {
+            int code = srs_error_code(err);
+            if (code == ERROR_SYSTEM_FILE_EOF || code == ERROR_HTTP_RESPONSE_EOF || code == ERROR_HTTP_REQUEST_EOF
+                || code == ERROR_HTTP_STREAM_EOF
+            ) {
+                srs_freep(err);
+                return err;
+            }
+            return srs_error_wrap(err, "read body");
+        }
+
+        if (nb_read > 0) {
+            content.append(buf.get(), nb_read);
+        }
+    }
+
+    return err;
+}
+
+#if defined(__linux__) || defined(SRS_OSX)
+utsname* srs_get_system_uname_info()
+{
+    static utsname* system_info = NULL;
+
+    if (system_info != NULL) {
+        return system_info;
+    }
+
+    system_info = new utsname();
+    memset(system_info, 0, sizeof(utsname));
+    if (uname(system_info) < 0) {
+        srs_warn("uname failed");
+    }
+
+    return system_info;
+}
+#endif
+
+string srs_string_dumps_hex(const std::string& str)
+{
+    return srs_string_dumps_hex(str.c_str(), str.size());
+}
+
+string srs_string_dumps_hex(const char* str, int length)
+{
+    return srs_string_dumps_hex(str, length, INT_MAX);
+}
+
+string srs_string_dumps_hex(const char* str, int length, int limit)
+{
+    return srs_string_dumps_hex(str, length, limit, ' ', 128, '\n');
+}
+
+string srs_string_dumps_hex(const char* str, int length, int limit, char seperator, int line_limit, char newline)
+{
+    // 1 byte trailing '\0'.
+    const int LIMIT = 1024*16 + 1;
+    static char buf[LIMIT];
+
+    int len = 0;
+    for (int i = 0; i < length && i < limit && len < LIMIT; ++i) {
+        int nb = snprintf(buf + len, LIMIT - len, "%02x", (uint8_t)str[i]);
+        if (nb <= 0 || nb >= LIMIT - len) {
+            break;
+        }
+        len += nb;
+
+        // Only append seperator and newline when not last byte.
+        if (i < length - 1 && i < limit - 1 && len < LIMIT) {
+            if (seperator) {
+                buf[len++] = seperator;
+            }
+
+            if (newline && line_limit && i > 0 && ((i + 1) % line_limit) == 0) {
+                buf[len++] = newline;
+            }
+        }
+    }
+
+    // Empty string.
+    if (len <= 0) {
+        return "";
+    }
+
+    // If overflow, cut the trailing newline.
+    if (newline && len >= LIMIT - 2 && buf[len - 1] == newline) {
+        len--;
+    }
+
+    // If overflow, cut the trailing seperator.
+    if (seperator && len >= LIMIT - 3 && buf[len - 1] == seperator) {
+        len--;
+    }
+
+    return string(buf, len);
 }
 

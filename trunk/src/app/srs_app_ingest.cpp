@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_app_ingest.hpp>
@@ -94,7 +94,7 @@ SrsIngester::SrsIngester()
     disposed = false;
     
     trd = new SrsDummyCoroutine();
-    pprint = SrsPithyPrint::create_ingester();
+    pprint_ = SrsPithyPrint::create_ingester();
 }
 
 SrsIngester::~SrsIngester()
@@ -103,6 +103,7 @@ SrsIngester::~SrsIngester()
     
     srs_freep(trd);
     clear_engines();
+    srs_freep(pprint_);
 }
 
 void SrsIngester::dispose()
@@ -369,6 +370,11 @@ srs_error_t SrsIngester::initialize_ffmpeg(SrsFFMPEG* ffmpeg, SrsConfDirective* 
     output = srs_string_replace(output, "[vhost]", vhost->arg0());
     output = srs_string_replace(output, "[port]", srs_int2str(port));
     output = srs_path_build_timestamp(output);
+    // Remove the only param with default vhost.
+    output = srs_string_replace(output, "vhost=" SRS_CONSTS_RTMP_DEFAULT_VHOST, "");
+    output = srs_string_replace(output, "?&", "?");
+    output = srs_string_replace(output, "?/", "/"); // For params over app.
+    output = srs_string_trim_end(output, "?");
     if (output.empty()) {
         return srs_error_new(ERROR_ENCODER_NO_OUTPUT, "empty output url, ingest=%s", ingest->arg0().c_str());
     }
@@ -427,8 +433,8 @@ srs_error_t SrsIngester::initialize_ffmpeg(SrsFFMPEG* ffmpeg, SrsConfDirective* 
             return srs_error_new(ERROR_ENCODER_NO_INPUT, "empty intput url, ingest=%s", ingest->arg0().c_str());
         }
         
-        // for stream, no re.
-        ffmpeg->append_iparam("");
+        // For stream, also use -re, to ingest HLS better.
+        ffmpeg->append_iparam("-re");
         
         if ((err = ffmpeg->initialize(input_url, output, log_file)) != srs_success) {
             return srs_error_wrap(err, "init ffmpeg");
@@ -461,7 +467,7 @@ srs_error_t SrsIngester::initialize_ffmpeg(SrsFFMPEG* ffmpeg, SrsConfDirective* 
 
 void SrsIngester::show_ingest_log_message()
 {
-    pprint->elapse();
+    pprint_->elapse();
     
     if ((int)ingesters.size() <= 0) {
         return;
@@ -472,9 +478,9 @@ void SrsIngester::show_ingest_log_message()
     SrsIngesterFFMPEG* ingester = ingesters.at(index);
     
     // reportable
-    if (pprint->can_print()) {
+    if (pprint_->can_print()) {
         srs_trace("-> " SRS_CONSTS_LOG_INGESTER " time=%dms, ingesters=%d, #%d(alive=%dms, %s)",
-                  srsu2msi(pprint->age()), (int)ingesters.size(), index, srsu2msi(ingester->alive()), ingester->uri().c_str());
+                  srsu2msi(pprint_->age()), (int)ingesters.size(), index, srsu2msi(ingester->alive()), ingester->uri().c_str());
     }
 }
 

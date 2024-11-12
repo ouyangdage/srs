@@ -1,13 +1,11 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_CORE_PERFORMANCE_HPP
 #define SRS_CORE_PERFORMANCE_HPP
-
-#include <srs_core.hpp>
 
 /**
  * this file defines the perfromance options.

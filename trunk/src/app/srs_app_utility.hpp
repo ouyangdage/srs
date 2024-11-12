@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_APP_UTILITY_HPP
@@ -28,6 +28,7 @@ class SrsJsonObject;
 // Convert level in string to log level in int.
 // @return the log level defined in SrsLogLevel.
 extern SrsLogLevel srs_get_log_level(std::string level);
+extern SrsLogLevel srs_get_log_level_v2(std::string level);
 
 // Build the path according to vhost/app/stream, where replace variables:
 //       [vhost], the vhost of stream.
@@ -54,7 +55,7 @@ extern std::string srs_path_build_timestamp(std::string template_path);
 // @return an int error code.
 extern srs_error_t srs_kill_forced(int& pid);
 
-// Current process resouce usage.
+// Current process resource usage.
 // @see: man getrusage
 class SrsRusage
 {
@@ -676,16 +677,9 @@ extern bool srs_is_boolean(std::string str);
 // Dump summaries for /api/v1/summaries.
 extern void srs_api_dump_summaries(SrsJsonObject* obj);
 
-// Dump string(str in length) to hex, it will process min(limit, length) chars.
-// Append seperator between each elem, and newline when exceed line_limit, '\0' to ignore.
-extern std::string srs_string_dumps_hex(const std::string& str);
-extern std::string srs_string_dumps_hex(const char* str, int length);
-extern std::string srs_string_dumps_hex(const char* str, int length, int limit);
-extern std::string srs_string_dumps_hex(const char* str, int length, int limit, char seperator, int line_limit, char newline);
-
 // Get ENV variable, which may starts with $.
-//      srs_getenv("EIP") === srs_getenv("$EIP")
-extern std::string srs_getenv(std::string key);
+//      srs_getenv("EIP") is srs_getenv("$EIP")
+extern std::string srs_getenv(const std::string& key);
 
 #endif
 

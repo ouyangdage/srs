@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_protocol_log.hpp>
@@ -33,7 +33,7 @@ SrsThreadContext::~SrsThreadContext()
 
 SrsContextId SrsThreadContext::generate_id()
 {
-    SrsContextId cid = SrsContextId();
+    SrsContextId cid;
     return cid.set_value(srs_random_str(8));
 }
 
@@ -63,9 +63,18 @@ const SrsContextId& SrsThreadContext::get_id()
 
 const SrsContextId& SrsThreadContext::set_id(const SrsContextId& v)
 {
+    return srs_context_set_cid_of(srs_thread_self(), v);
+}
+
+void SrsThreadContext::clear_cid()
+{
+}
+
+const SrsContextId& srs_context_set_cid_of(srs_thread_t trd, const SrsContextId& v)
+{
     ++_srs_pps_cids_set->sugar;
 
-    if (!srs_thread_self()) {
+    if (!trd) {
         _srs_context_default = v;
         return v;
     }
@@ -78,14 +87,10 @@ const SrsContextId& SrsThreadContext::set_id(const SrsContextId& v)
         srs_assert(r0 == 0);
     }
 
-    int r0 = srs_thread_setspecific(_srs_context_key, cid);
+    int r0 = srs_thread_setspecific2(trd, _srs_context_key, cid);
     srs_assert(r0 == 0);
 
     return v;
-}
-
-void SrsThreadContext::clear_cid()
-{
 }
 
 impl_SrsContextRestore::impl_SrsContextRestore(SrsContextId cid)
@@ -101,7 +106,7 @@ impl_SrsContextRestore::~impl_SrsContextRestore()
 // LCOV_EXCL_START
 SrsConsoleLog::SrsConsoleLog(SrsLogLevel l, bool u)
 {
-    level = l;
+    level_ = l;
     utc = u;
     
     buffer = new char[SRS_BASIC_LOG_SIZE];
@@ -121,130 +126,26 @@ void SrsConsoleLog::reopen()
 {
 }
 
-void SrsConsoleLog::verbose(const char* tag, SrsContextId context_id, const char* fmt, ...)
+void SrsConsoleLog::log(SrsLogLevel level, const char* tag, const SrsContextId& context_id, const char* fmt, va_list args)
 {
-    if (level > SrsLogLevelVerbose) {
+    if (level < level_ || level >= SrsLogLevelDisabled) {
         return;
     }
     
     int size = 0;
-    if (!srs_log_header(buffer, SRS_BASIC_LOG_SIZE, utc, false, tag, context_id, "Verb", &size)) {
+    if (!srs_log_header(buffer, SRS_BASIC_LOG_SIZE, utc, level >= SrsLogLevelWarn, tag, context_id, srs_log_level_strings[level], &size)) {
         return;
     }
-    
-    va_list ap;
-    va_start(ap, fmt);
-    int r0 = vsnprintf(buffer + size, SRS_BASIC_LOG_SIZE - size, fmt, ap);
-    va_end(ap);
 
     // Something not expected, drop the log.
+    int r0 = vsnprintf(buffer + size, SRS_BASIC_LOG_SIZE - size, fmt, args);
     if (r0 <= 0 || r0 >= SRS_BASIC_LOG_SIZE - size) {
         return;
     }
     size += r0;
-    
-    fprintf(stdout, "%s\n", buffer);
-}
 
-void SrsConsoleLog::info(const char* tag, SrsContextId context_id, const char* fmt, ...)
-{
-    if (level > SrsLogLevelInfo) {
-        return;
-    }
-    
-    int size = 0;
-    if (!srs_log_header(buffer, SRS_BASIC_LOG_SIZE, utc, false, tag, context_id, "Debug", &size)) {
-        return;
-    }
-    
-    va_list ap;
-    va_start(ap, fmt);
-    int r0 = vsnprintf(buffer + size, SRS_BASIC_LOG_SIZE - size, fmt, ap);
-    va_end(ap);
-
-    // Something not expected, drop the log.
-    if (r0 <= 0 || r0 >= SRS_BASIC_LOG_SIZE - size) {
-        return;
-    }
-    size += r0;
-    
-    fprintf(stdout, "%s\n", buffer);
-}
-
-void SrsConsoleLog::trace(const char* tag, SrsContextId context_id, const char* fmt, ...)
-{
-    if (level > SrsLogLevelTrace) {
-        return;
-    }
-    
-    int size = 0;
-    if (!srs_log_header(buffer, SRS_BASIC_LOG_SIZE, utc, false, tag, context_id, "Trace", &size)) {
-        return;
-    }
-    
-    va_list ap;
-    va_start(ap, fmt);
-    int r0 = vsnprintf(buffer + size, SRS_BASIC_LOG_SIZE - size, fmt, ap);
-    va_end(ap);
-
-    // Something not expected, drop the log.
-    if (r0 <= 0 || r0 >= SRS_BASIC_LOG_SIZE - size) {
-        return;
-    }
-    size += r0;
-    
-    fprintf(stdout, "%s\n", buffer);
-}
-
-void SrsConsoleLog::warn(const char* tag, SrsContextId context_id, const char* fmt, ...)
-{
-    if (level > SrsLogLevelWarn) {
-        return;
-    }
-    
-    int size = 0;
-    if (!srs_log_header(buffer, SRS_BASIC_LOG_SIZE, utc, true, tag, context_id, "Warn", &size)) {
-        return;
-    }
-    
-    va_list ap;
-    va_start(ap, fmt);
-    int r0 = vsnprintf(buffer + size, SRS_BASIC_LOG_SIZE - size, fmt, ap);
-    va_end(ap);
-
-    // Something not expected, drop the log.
-    if (r0 <= 0 || r0 >= SRS_BASIC_LOG_SIZE - size) {
-        return;
-    }
-    size += r0;
-    
-    fprintf(stderr, "%s\n", buffer);
-}
-
-void SrsConsoleLog::error(const char* tag, SrsContextId context_id, const char* fmt, ...)
-{
-    if (level > SrsLogLevelError) {
-        return;
-    }
-    
-    int size = 0;
-    if (!srs_log_header(buffer, SRS_BASIC_LOG_SIZE, utc, true, tag, context_id, "Error", &size)) {
-        return;
-    }
-    
-    va_list ap;
-    va_start(ap, fmt);
-    int r0 = vsnprintf(buffer + size, SRS_BASIC_LOG_SIZE - size, fmt, ap);
-    va_end(ap);
-
-    // Something not expected, drop the log.
-    if (r0 <= 0 || r0 >= SRS_BASIC_LOG_SIZE - size) {
-        return;
-    }
-    size += r0;
-    
-    // add strerror() to error msg.
-    if (errno != 0) {
+    // Add errno and strerror() if error.
+    if (level == SrsLogLevelError && errno != 0) {
         r0 = snprintf(buffer + size, SRS_BASIC_LOG_SIZE - size, "(%s)", strerror(errno));
 
         // Something not expected, drop the log.
@@ -253,10 +154,13 @@ void SrsConsoleLog::error(const char* tag, SrsContextId context_id, const char* 
         }
         size += r0;
     }
-    
-    fprintf(stderr, "%s\n", buffer);
+
+    if (level >= SrsLogLevelWarn) {
+        fprintf(stderr, "%s\n", buffer);
+    } else {
+        fprintf(stdout, "%s\n", buffer);
+    }
 }
-// LCOV_EXCL_STOP
 
 bool srs_log_header(char* buffer, int size, bool utc, bool dangerous, const char* tag, SrsContextId cid, const char* level, int* psize)
 {

@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_PROTOCOL_UTILITY_HPP
@@ -26,12 +26,17 @@
 
 #include <srs_protocol_st.hpp>
 
+#if defined(__linux__) || defined(SRS_OSX)
+#include <sys/utsname.h>
+#endif
+
 class ISrsHttpMessage;
 
 class SrsMessageHeader;
 class SrsSharedPtrMessage;
 class SrsCommonMessage;
 class ISrsProtocolReadWriter;
+class ISrsReader;
 
 /**
  * parse the tcUrl, output the schema, host, vhost, app and port.
@@ -52,6 +57,12 @@ class ISrsProtocolReadWriter;
 extern void srs_discovery_tc_url(std::string tcUrl, std::string& schema, std::string& host, std::string& vhost, std::string& app,
     std::string& stream, int& port, std::string& param);
 
+// Guessing stream by app and param, to make OBS happy. For example:
+//      rtmp://ip/live/livestream
+//      rtmp://ip/live/livestream?secret=xxx
+//      rtmp://ip/live?secret=xxx/livestream
+extern void srs_guess_stream_by_app(std::string& app, std::string& param, std::string& stream);
+
 // parse query string to map(k,v).
 // must format as key=value&...&keyN=valueN
 extern void srs_parse_query_string(std::string q, std::map<std::string, std::string>& query);
@@ -69,7 +80,7 @@ extern long srs_random();
  * generate the tcUrl without param.
  * @remark Use host as tcUrl.vhost if vhost is default vhost.
  */
-extern std::string srs_generate_tc_url(std::string host, std::string vhost, std::string app, int port);
+extern std::string srs_generate_tc_url(std::string schema, std::string host, std::string vhost, std::string app, int port);
 
 /**
  * Generate the stream with param.
@@ -137,15 +148,15 @@ extern bool srs_string_is_http(std::string url);
 extern bool srs_string_is_rtmp(std::string url);
 
 // Whether string is digit number
-//      is_digit("0")  === true
-//      is_digit("0000000000")  === true
-//      is_digit("1234567890")  === true
-//      is_digit("0123456789")  === true
-//      is_digit("1234567890a") === false
-//      is_digit("a1234567890") === false
-//      is_digit("10e3") === false
-//      is_digit("!1234567890") === false
-//      is_digit("") === false
+//      is_digit("0")  is true
+//      is_digit("0000000000")  is true
+//      is_digit("1234567890")  is true
+//      is_digit("0123456789")  is true
+//      is_digit("1234567890a") is false
+//      is_digit("a1234567890") is false
+//      is_digit("10e3") is false
+//      is_digit("!1234567890") is false
+//      is_digit("") is false
 extern bool srs_is_digit_number(std::string str);
 
 // Get local ip, fill to @param ips
@@ -176,6 +187,21 @@ extern std::string srs_get_original_ip(ISrsHttpMessage* r);
 
 // Get hostname
 extern std::string srs_get_system_hostname(void);
+
+// Read all content util EOF.
+extern srs_error_t srs_ioutil_read_all(ISrsReader* in, std::string& content);
+
+#if defined(__linux__) || defined(SRS_OSX)
+// Get system uname info.
+extern utsname* srs_get_system_uname_info();
+#endif
+
+// Dump string(str in length) to hex, it will process min(limit, length) chars.
+// Append seperator between each elem, and newline when exceed line_limit, '\0' to ignore.
+extern std::string srs_string_dumps_hex(const std::string& str);
+extern std::string srs_string_dumps_hex(const char* str, int length);
+extern std::string srs_string_dumps_hex(const char* str, int length, int limit);
+extern std::string srs_string_dumps_hex(const char* str, int length, int limit, char seperator, int line_limit, char newline);
 
 #endif
 

@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_APP_SRT_CONN_HPP
@@ -16,11 +16,13 @@
 #include <srs_app_st.hpp>
 #include <srs_app_conn.hpp>
 #include <srs_app_srt_utility.hpp>
+#include <srs_app_security.hpp>
 
 class SrsBuffer;
 class SrsLiveSource;
 class SrsSrtSource;
 class SrsSrtServer;
+class SrsNetworkDelta;
 
 // The basic connection of SRS, for SRT based protocols,
 // all srt connections accept from srt listener must extends from this base class,
@@ -70,7 +72,7 @@ private:
     srs_error_t recv_err_;
 };
 
-class SrsMpegtsSrtConn : public ISrsStartableConneciton, public ISrsCoroutineHandler
+class SrsMpegtsSrtConn : public ISrsConnection, public ISrsStartable, public ISrsCoroutineHandler, public ISrsExpire
 {
 public:
     SrsMpegtsSrtConn(SrsSrtServer* srt_server, srs_srt_t srt_fd, std::string ip, int port);
@@ -78,9 +80,11 @@ public:
 // Interface ISrsResource.
 public:
     virtual std::string desc();
-// Interface ISrsKbpsDelta
 public:
-    virtual void remark(int64_t* in, int64_t* out);
+    ISrsKbpsDelta* delta();
+// Interface ISrsExpire
+public:
+    virtual void expire();
 public:
     virtual srs_error_t start();
 // Interface ISrsConnection.
@@ -112,14 +116,15 @@ private:
     SrsSrtServer* srt_server_;
     srs_srt_t srt_fd_;
     SrsSrtConnection* srt_conn_;
-    SrsWallClock* clock_;
-    SrsKbps* kbps_;
+    SrsNetworkDelta* delta_;
+    SrsNetworkKbps* kbps_;
     std::string ip_;
     int port_;
     SrsCoroutine* trd_;
 
     SrsRequest* req_;
-    SrsSrtSource* srt_source_;
+    SrsSharedPtr<SrsSrtSource> srt_source_;
+    SrsSecurity* security_;
 };
 
 #endif

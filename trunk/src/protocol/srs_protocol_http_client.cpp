@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_protocol_http_client.hpp>
@@ -54,7 +54,9 @@ SrsSslClient::~SrsSslClient()
     }
 }
 
-srs_error_t SrsSslClient::handshake()
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+srs_error_t SrsSslClient::handshake(const std::string& host)
 {
     srs_error_t err = srs_success;
 
@@ -86,9 +88,13 @@ srs_error_t SrsSslClient::handshake()
     // SSL setup active, as client role.
     SSL_set_connect_state(ssl);
     SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE);
+    // If the server address is not in IP address format, set the host in the Server Name Indication (SNI) field.
+    if (!srs_check_ip_addr_valid(host)) {
+        SSL_set_tlsext_host_name(ssl, host.c_str());
+    }
 
     // Send ClientHello.
-    int r0 = SSL_do_handshake(ssl); int r1 = SSL_get_error(ssl, r0);
+    int r0 = SSL_do_handshake(ssl); int r1 = SSL_get_error(ssl, r0); ERR_clear_error();
     if (r0 != -1 || r1 != SSL_ERROR_WANT_READ) {
         return srs_error_new(ERROR_HTTPS_HANDSHAKE, "handshake r0=%d, r1=%d", r0, r1);
     }
@@ -119,7 +125,8 @@ srs_error_t SrsSslClient::handshake()
             return srs_error_new(ERROR_HTTPS_HANDSHAKE, "BIO_write r0=%d, data=%p, size=%d", r0, buf, nn);
         }
 
-        if ((r0 = SSL_do_handshake(ssl)) != -1 || (r1 = SSL_get_error(ssl, r0)) != SSL_ERROR_WANT_READ) {
+        r0 = SSL_do_handshake(ssl); r1 = SSL_get_error(ssl, r0); ERR_clear_error();
+        if (r0 != -1 || r1 != SSL_ERROR_WANT_READ) {
             return srs_error_new(ERROR_HTTPS_HANDSHAKE, "handshake r0=%d, r1=%d", r0, r1);
         }
 
@@ -157,7 +164,7 @@ srs_error_t SrsSslClient::handshake()
             return srs_error_new(ERROR_HTTPS_HANDSHAKE, "BIO_write r0=%d, data=%p, size=%d", r0, buf, nn);
         }
 
-        r0 = SSL_do_handshake(ssl); r1 = SSL_get_error(ssl, r0);
+        r0 = SSL_do_handshake(ssl); r1 = SSL_get_error(ssl, r0); ERR_clear_error();
         if (r0 == 1 && r1 == SSL_ERROR_NONE) {
             break;
         }
@@ -171,13 +178,14 @@ srs_error_t SrsSslClient::handshake()
 
     return err;
 }
+#pragma GCC diagnostic pop
 
 srs_error_t SrsSslClient::read(void* plaintext, size_t nn_plaintext, ssize_t* nread)
 {
     srs_error_t err = srs_success;
 
     while (true) {
-        int r0 = SSL_read(ssl, plaintext, nn_plaintext); int r1 = SSL_get_error(ssl, r0);
+        int r0 = SSL_read(ssl, plaintext, nn_plaintext); int r1 = SSL_get_error(ssl, r0); ERR_clear_error();
         int r2 = BIO_ctrl_pending(bio_in); int r3 = SSL_is_init_finished(ssl);
 
         // OK, got data.
@@ -193,19 +201,18 @@ srs_error_t SrsSslClient::read(void* plaintext, size_t nn_plaintext, ssize_t* nr
         if (r0 == -1 && r1 == SSL_ERROR_WANT_READ) {
             // TODO: Can we avoid copy?
             int nn_cipher = nn_plaintext;
-            char* cipher = new char[nn_cipher];
-            SrsAutoFreeA(char, cipher);
+            SrsUniquePtr<char[]> cipher(new char[nn_cipher]);
 
             // Read the cipher from SSL.
             ssize_t nn = 0;
-            if ((err = transport->read(cipher, nn_cipher, &nn)) != srs_success) {
+            if ((err = transport->read(cipher.get(), nn_cipher, &nn)) != srs_success) {
                 return srs_error_wrap(err, "https: read");
             }
 
-            int r0 = BIO_write(bio_in, cipher, nn);
+            int r0 = BIO_write(bio_in, cipher.get(), nn);
             if (r0 <= 0) {
                 // TODO: 0 or -1 maybe block, use BIO_should_retry to check.
-                return srs_error_new(ERROR_HTTPS_READ, "BIO_write r0=%d, cipher=%p, size=%d", r0, cipher, nn);
+                return srs_error_new(ERROR_HTTPS_READ, "BIO_write r0=%d, cipher=%p, size=%d", r0, cipher.get(), nn);
             }
             continue;
         }
@@ -225,7 +232,7 @@ srs_error_t SrsSslClient::write(void* plaintext, size_t nn_plaintext, ssize_t* n
     for (char* p = (char*)plaintext; p < (char*)plaintext + nn_plaintext;) {
         int left = (int)nn_plaintext - (p - (char*)plaintext);
         int r0 = SSL_write(ssl, (const void*)p, left);
-        int r1 = SSL_get_error(ssl, r0);
+        int r1 = SSL_get_error(ssl, r0); ERR_clear_error();
         if (r0 <= 0) {
             return srs_error_new(ERROR_HTTPS_WRITE, "https: write data=%p, size=%d, r0=%d, r1=%d", p, left, r0, r1);
         }
@@ -253,8 +260,7 @@ SrsHttpClient::SrsHttpClient()
 {
     transport = NULL;
     ssl_transport = NULL;
-    clk = new SrsWallClock();
-    kbps = new SrsKbps(clk);
+    kbps = new SrsNetworkKbps();
     parser = NULL;
     recv_timeout = timeout = SRS_UTIME_NO_TIMEOUT;
     port = 0;
@@ -263,9 +269,8 @@ SrsHttpClient::SrsHttpClient()
 SrsHttpClient::~SrsHttpClient()
 {
     disconnect();
-    
+
     srs_freep(kbps);
-    srs_freep(clk);
     srs_freep(parser);
 }
 
@@ -326,6 +331,7 @@ srs_error_t SrsHttpClient::post(string path, string req, ISrsHttpMessage** ppmsg
         path = "/";
     }
 
+    // TODO: FIXME: Use SrsHttpMessageWriter, never use stringstream and headers.
     // send POST request to uri
     // POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n%s
     std::stringstream ss;
@@ -410,18 +416,18 @@ void SrsHttpClient::set_recv_timeout(srs_utime_t tm)
     recv_timeout = tm;
 }
 
-void SrsHttpClient::kbps_sample(const char* label, int64_t age)
+void SrsHttpClient::kbps_sample(const char* label, srs_utime_t age)
 {
     kbps->sample();
-    
+
     int sr = kbps->get_send_kbps();
     int sr30s = kbps->get_send_kbps_30s();
     int sr5m = kbps->get_send_kbps_5m();
     int rr = kbps->get_recv_kbps();
     int rr30s = kbps->get_recv_kbps_30s();
     int rr5m = kbps->get_recv_kbps_5m();
-    
-    srs_trace("<- %s time=%" PRId64 ", okbps=%d,%d,%d, ikbps=%d,%d,%d", label, age, sr, sr30s, sr5m, rr, rr30s, rr5m);
+
+    srs_trace("<- %s time=%" PRId64 ", okbps=%d,%d,%d, ikbps=%d,%d,%d", label, srsu2ms(age), sr, sr30s, sr5m, rr, rr30s, rr5m);
 }
 
 void SrsHttpClient::disconnect()
@@ -450,9 +456,9 @@ srs_error_t SrsHttpClient::connect()
     // Set the recv/send timeout in srs_utime_t.
     transport->set_recv_timeout(recv_timeout);
     transport->set_send_timeout(timeout);
-    
-    kbps->set_io(transport, transport);
 
+    kbps->set_io(transport, transport);
+    
     if (schema_ != "https") {
         return err;
     }
@@ -465,7 +471,7 @@ srs_error_t SrsHttpClient::connect()
 
     srs_utime_t starttime = srs_update_system_time();
 
-    if ((err = ssl_transport->handshake()) != srs_success) {
+    if ((err = ssl_transport->handshake(host)) != srs_success) {
         disconnect();
         return srs_error_wrap(err, "http: ssl connect %s %s:%d to=%dms, rto=%dms",
             schema_.c_str(), host.c_str(), port, srsu2msi(timeout), srsu2msi(recv_timeout));

@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_APP_EDGE_HPP
@@ -10,6 +10,7 @@
 #include <srs_core.hpp>
 
 #include <srs_app_st.hpp>
+#include <srs_core_autofree.hpp>
 
 #include <string>
 
@@ -32,6 +33,7 @@ class SrsHttpClient;
 class ISrsHttpMessage;
 class SrsHttpFileReader;
 class SrsFlvDecoder;
+class ISrsApmSpan;
 
 // The state of edge, auto machine
 enum SrsEdgeState
@@ -71,7 +73,7 @@ public:
 public:
     virtual void selected(std::string& server, int& port) = 0;
     virtual void set_recv_timeout(srs_utime_t tm) = 0;
-    virtual void kbps_sample(const char* label, int64_t age) = 0;
+    virtual void kbps_sample(const char* label, srs_utime_t age) = 0;
 };
 
 class SrsEdgeRtmpUpstream : public SrsEdgeUpstream
@@ -97,7 +99,7 @@ public:
 public:
     virtual void selected(std::string& server, int& port);
     virtual void set_recv_timeout(srs_utime_t tm);
-    virtual void kbps_sample(const char* label, int64_t age);
+    virtual void kbps_sample(const char* label, srs_utime_t age);
 };
 
 class SrsEdgeFlvUpstream : public SrsEdgeUpstream
@@ -129,27 +131,36 @@ public:
 public:
     virtual void selected(std::string& server, int& port);
     virtual void set_recv_timeout(srs_utime_t tm);
-    virtual void kbps_sample(const char* label, int64_t age);
+    virtual void kbps_sample(const char* label, srs_utime_t age);
 };
 
 // The edge used to ingest stream from origin.
 class SrsEdgeIngester : public ISrsCoroutineHandler
 {
 private:
-    SrsLiveSource* source;
+    // Because source references to this object, so we should directly use the source ptr.
+    SrsLiveSource* source_;
+private:
     SrsPlayEdge* edge;
     SrsRequest* req;
     SrsCoroutine* trd;
     SrsLbRoundRobin* lb;
     SrsEdgeUpstream* upstream;
+#ifdef SRS_APM
+    ISrsApmSpan* span_main_;
+#endif
 public:
     SrsEdgeIngester();
     virtual ~SrsEdgeIngester();
 public:
-    virtual srs_error_t initialize(SrsLiveSource* s, SrsPlayEdge* e, SrsRequest* r);
+    virtual srs_error_t initialize(SrsSharedPtr<SrsLiveSource> s, SrsPlayEdge* e, SrsRequest* r);
     virtual srs_error_t start();
     virtual void stop();
     virtual std::string get_curr_origin();
+#ifdef SRS_APM
+    // Get the current main span. Note that it might be NULL.
+    ISrsApmSpan* span();
+#endif
 // Interface ISrsReusableThread2Handler
 public:
     virtual srs_error_t cycle();
@@ -164,7 +175,9 @@ private:
 class SrsEdgeForwarder : public ISrsCoroutineHandler
 {
 private:
-    SrsLiveSource* source;
+    // Because source references to this object, so we should directly use the source ptr.
+    SrsLiveSource* source_;
+private:
     SrsPublishEdge* edge;
     SrsRequest* req;
     SrsCoroutine* trd;
@@ -183,7 +196,7 @@ public:
 public:
     virtual void set_queue_size(srs_utime_t queue_size);
 public:
-    virtual srs_error_t initialize(SrsLiveSource* s, SrsPublishEdge* e, SrsRequest* r);
+    virtual srs_error_t initialize(SrsSharedPtr<SrsLiveSource> s, SrsPublishEdge* e, SrsRequest* r);
     virtual srs_error_t start();
     virtual void stop();
 // Interface ISrsReusableThread2Handler
@@ -208,7 +221,7 @@ public:
     // Always use the req of source,
     // For we assume all client to edge is invalid,
     // if auth open, edge must valid it from origin, then service it.
-    virtual srs_error_t initialize(SrsLiveSource* source, SrsRequest* req);
+    virtual srs_error_t initialize(SrsSharedPtr<SrsLiveSource> source, SrsRequest* req);
     // When client play stream on edge.
     virtual srs_error_t on_client_play();
     // When all client stopped play, disconnect to origin.
@@ -231,7 +244,7 @@ public:
 public:
     virtual void set_queue_size(srs_utime_t queue_size);
 public:
-    virtual srs_error_t initialize(SrsLiveSource* source, SrsRequest* req);
+    virtual srs_error_t initialize(SrsSharedPtr<SrsLiveSource> source, SrsRequest* req);
     virtual bool can_publish();
     // When client publish stream on edge.
     virtual srs_error_t on_client_publish();

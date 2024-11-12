@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_PROTOCOL_RTMP_CONN_HPP
@@ -17,8 +17,9 @@ class SrsRtmpClient;
 class SrsCommonMessage;
 class SrsSharedPtrMessage;
 class SrsPacket;
-class SrsKbps;
+class SrsNetworkKbps;
 class SrsWallClock;
+class SrsAmf0Object;
 
 // The simple RTMP client, provides friendly APIs.
 // @remark Should never use client when closed.
@@ -38,8 +39,7 @@ protected:
 private:
     SrsTcpClient* transport;
     SrsRtmpClient* client;
-    SrsKbps* kbps;
-    SrsWallClock* clk;
+    SrsNetworkKbps* kbps;
     int stream_id;
 public:
     // Constructor.
@@ -48,6 +48,9 @@ public:
     // @param stm The timeout in srs_utime_t to delivery A/V stream.
     SrsBasicRtmpClient(std::string r, srs_utime_t ctm, srs_utime_t stm);
     virtual ~SrsBasicRtmpClient();
+public:
+    // Get extra args to carry more information.
+    SrsAmf0Object* extra_args();
 public:
     // Connect, handshake and connect app to RTMP server.
     // @remark We always close the transport.
@@ -59,8 +62,8 @@ protected:
 public:
     virtual srs_error_t publish(int chunk_size, bool with_vhost = true, std::string* pstream = NULL);
     virtual srs_error_t play(int chunk_size, bool with_vhost = true, std::string* pstream = NULL);
-    virtual void kbps_sample(const char* label, int64_t age);
-    virtual void kbps_sample(const char* label, int64_t age, int msgs);
+    virtual void kbps_sample(const char* label, srs_utime_t age);
+    virtual void kbps_sample(const char* label, srs_utime_t age, int msgs);
     virtual int sid();
 public:
     virtual srs_error_t recv_message(SrsCommonMessage** pmsg);

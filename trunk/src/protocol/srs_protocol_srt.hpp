@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_PROTOCOL_SRT_HPP
@@ -15,7 +15,7 @@
 
 class SrsSrtSocket;
 
-extern srs_error_t srs_srt_log_initialie();
+extern srs_error_t srs_srt_log_initialize();
 
 typedef int srs_srt_t;
 extern srs_srt_t srs_srt_socket_invalid();
@@ -34,7 +34,7 @@ extern srs_error_t srs_srt_listen(srs_srt_t srt_fd, std::string ip, int port);
 extern srs_error_t srs_srt_nonblock(srs_srt_t srt_fd);
 
 // Set SRT options.
-extern srs_error_t srs_srt_set_maxbw(srs_srt_t srt_fd, int maxbw);
+extern srs_error_t srs_srt_set_maxbw(srs_srt_t srt_fd, int64_t maxbw);
 extern srs_error_t srs_srt_set_mss(srs_srt_t srt_fd, int mss);
 extern srs_error_t srs_srt_set_payload_size(srs_srt_t srt_fd, int payload_size);
 extern srs_error_t srs_srt_set_connect_timeout(srs_srt_t srt_fd, int timeout);
@@ -47,9 +47,11 @@ extern srs_error_t srs_srt_set_latency(srs_srt_t srt_fd, int latency);
 extern srs_error_t srs_srt_set_rcv_latency(srs_srt_t srt_fd, int rcv_latency);
 extern srs_error_t srs_srt_set_peer_latency(srs_srt_t srt_fd, int peer_latency);
 extern srs_error_t srs_srt_set_streamid(srs_srt_t srt_fd, const std::string& streamid);
+extern srs_error_t srs_srt_set_passphrase(srs_srt_t srt_fd, const std::string& passphrase);
+extern srs_error_t srs_srt_set_pbkeylen(srs_srt_t srt_fd, int pbkeylen);
 
 // Get SRT options.
-extern srs_error_t srs_srt_get_maxbw(srs_srt_t srt_fd, int& maxbw);
+extern srs_error_t srs_srt_get_maxbw(srs_srt_t srt_fd, int64_t& maxbw);
 extern srs_error_t srs_srt_get_mss(srs_srt_t srt_fd, int& mss);
 extern srs_error_t srs_srt_get_payload_size(srs_srt_t srt_fd, int& payload_size);
 extern srs_error_t srs_srt_get_connect_timeout(srs_srt_t srt_fd, int& timeout);

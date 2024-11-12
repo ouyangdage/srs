@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_protocol_st.hpp>
@@ -9,6 +9,7 @@
 #include <st.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <netdb.h>
 using namespace std;
 
@@ -17,6 +18,7 @@ using namespace std;
 #include <srs_kernel_log.hpp>
 #include <srs_protocol_utility.hpp>
 #include <srs_kernel_utility.hpp>
+#include <srs_core_deprecated.hpp>
 
 // nginx also set to 512
 #define SERVER_LISTEN_BACKLOG 512
@@ -37,6 +39,23 @@ bool srs_st_epoll_is_supported(void)
 }
 #endif
 
+#ifdef SRS_SANITIZER
+void srs_set_primordial_stack(void* stack_top)
+{
+    if (!stack_top) {
+        return;
+    }
+
+    struct rlimit limit;
+    if (getrlimit (RLIMIT_STACK, &limit) != 0) {
+        return;
+    }
+
+    void* stack_bottom = (char*)stack_top - (uint64_t)limit.rlim_cur;
+    st_set_primordial_stack(stack_top, stack_bottom);
+}
+#endif
+
 srs_error_t srs_st_init()
 {
 #ifdef __linux__
@@ -48,9 +67,15 @@ srs_error_t srs_st_init()
     
     // Select the best event system available on the OS. In Linux this is
     // epoll(). On BSD it will be kqueue.
+#if defined(SRS_CYGWIN64)
+    if (st_set_eventsys(ST_EVENTSYS_SELECT) == -1) {
+        return srs_error_new(ERROR_ST_SET_SELECT, "st enable st failed, current is %s", st_get_eventsys_name());
+    }
+#else
     if (st_set_eventsys(ST_EVENTSYS_ALT) == -1) {
         return srs_error_new(ERROR_ST_SET_EPOLL, "st enable st failed, current is %s", st_get_eventsys_name());
     }
+#endif
 
     // Before ST init, we might have already initialized the background cid.
     SrsContextId cid = _srs_context->get_id();
@@ -68,6 +93,11 @@ srs_error_t srs_st_init()
     srs_info("st_init success, use %s", st_get_eventsys_name());
     
     return srs_success;
+}
+
+void srs_st_destroy(void)
+{
+    st_destroy();
 }
 
 void srs_close_stfd(srs_netfd_t& stfd)
@@ -412,6 +442,11 @@ void *srs_thread_getspecific(int key)
     return st_thread_getspecific(key);
 }
 
+int srs_thread_setspecific2(srs_thread_t thread, int key, void* value)
+{
+    return st_thread_setspecific2((st_thread_t)thread, key, value);
+}
+
 int srs_netfd_fileno(srs_netfd_t stfd)
 {
     return st_netfd_fileno((st_netfd_t)stfd);
@@ -469,19 +504,23 @@ bool srs_is_never_timeout(srs_utime_t tm)
 
 SrsStSocket::SrsStSocket()
 {
-    stfd = NULL;
-    stm = rtm = SRS_UTIME_NO_TIMEOUT;
-    rbytes = sbytes = 0;
+    init(NULL);
+}
+
+SrsStSocket::SrsStSocket(srs_netfd_t fd)
+{
+    init(fd);
 }
 
 SrsStSocket::~SrsStSocket()
 {
 }
 
-srs_error_t SrsStSocket::initialize(srs_netfd_t fd)
+void SrsStSocket::init(srs_netfd_t fd)
 {
-    stfd = fd;
-    return srs_success;
+    stfd_ = fd;
+    stm = rtm = SRS_UTIME_NO_TIMEOUT;
+    rbytes = sbytes = 0;
 }
 
 void SrsStSocket::set_recv_timeout(srs_utime_t tm)
@@ -517,12 +556,14 @@ int64_t SrsStSocket::get_send_bytes()
 srs_error_t SrsStSocket::read(void* buf, size_t size, ssize_t* nread)
 {
     srs_error_t err = srs_success;
-    
+
+    srs_assert(stfd_);
+
     ssize_t nb_read;
     if (rtm == SRS_UTIME_NO_TIMEOUT) {
-        nb_read = st_read((st_netfd_t)stfd, buf, size, ST_UTIME_NO_TIMEOUT);
+        nb_read = st_read((st_netfd_t)stfd_, buf, size, ST_UTIME_NO_TIMEOUT);
     } else {
-        nb_read = st_read((st_netfd_t)stfd, buf, size, rtm);
+        nb_read = st_read((st_netfd_t)stfd_, buf, size, rtm);
     }
     
     if (nread) {
@@ -552,12 +593,14 @@ srs_error_t SrsStSocket::read(void* buf, size_t size, ssize_t* nread)
 srs_error_t SrsStSocket::read_fully(void* buf, size_t size, ssize_t* nread)
 {
     srs_error_t err = srs_success;
+
+    srs_assert(stfd_);
     
     ssize_t nb_read;
     if (rtm == SRS_UTIME_NO_TIMEOUT) {
-        nb_read = st_read_fully((st_netfd_t)stfd, buf, size, ST_UTIME_NO_TIMEOUT);
+        nb_read = st_read_fully((st_netfd_t)stfd_, buf, size, ST_UTIME_NO_TIMEOUT);
     } else {
-        nb_read = st_read_fully((st_netfd_t)stfd, buf, size, rtm);
+        nb_read = st_read_fully((st_netfd_t)stfd_, buf, size, rtm);
     }
     
     if (nread) {
@@ -576,7 +619,7 @@ srs_error_t SrsStSocket::read_fully(void* buf, size_t size, ssize_t* nread)
             errno = ECONNRESET;
         }
         
-        return srs_error_new(ERROR_SOCKET_READ_FULLY, "read fully");
+        return srs_error_new(ERROR_SOCKET_READ_FULLY, "read fully, size=%d, nn=%d", size, nb_read);
     }
     
     rbytes += nb_read;
@@ -587,12 +630,14 @@ srs_error_t SrsStSocket::read_fully(void* buf, size_t size, ssize_t* nread)
 srs_error_t SrsStSocket::write(void* buf, size_t size, ssize_t* nwrite)
 {
     srs_error_t err = srs_success;
+
+    srs_assert(stfd_);
     
     ssize_t nb_write;
     if (stm == SRS_UTIME_NO_TIMEOUT) {
-        nb_write = st_write((st_netfd_t)stfd, buf, size, ST_UTIME_NO_TIMEOUT);
+        nb_write = st_write((st_netfd_t)stfd_, buf, size, ST_UTIME_NO_TIMEOUT);
     } else {
-        nb_write = st_write((st_netfd_t)stfd, buf, size, stm);
+        nb_write = st_write((st_netfd_t)stfd_, buf, size, stm);
     }
     
     if (nwrite) {
@@ -617,12 +662,14 @@ srs_error_t SrsStSocket::write(void* buf, size_t size, ssize_t* nwrite)
 srs_error_t SrsStSocket::writev(const iovec *iov, int iov_size, ssize_t* nwrite)
 {
     srs_error_t err = srs_success;
+
+    srs_assert(stfd_);
     
     ssize_t nb_write;
     if (stm == SRS_UTIME_NO_TIMEOUT) {
-        nb_write = st_writev((st_netfd_t)stfd, iov, iov_size, ST_UTIME_NO_TIMEOUT);
+        nb_write = st_writev((st_netfd_t)stfd_, iov, iov_size, ST_UTIME_NO_TIMEOUT);
     } else {
-        nb_write = st_writev((st_netfd_t)stfd, iov, iov_size, stm);
+        nb_write = st_writev((st_netfd_t)stfd_, iov, iov_size, stm);
     }
     
     if (nwrite) {
@@ -646,7 +693,7 @@ srs_error_t SrsStSocket::writev(const iovec *iov, int iov_size, ssize_t* nwrite)
 
 SrsTcpClient::SrsTcpClient(string h, int p, srs_utime_t tm)
 {
-    stfd = NULL;
+    stfd_ = NULL;
     io = new SrsStSocket();
     
     host = h;
@@ -656,37 +703,27 @@ SrsTcpClient::SrsTcpClient(string h, int p, srs_utime_t tm)
 
 SrsTcpClient::~SrsTcpClient()
 {
-    close();
-    
     srs_freep(io);
+    srs_close_stfd(stfd_);
 }
 
 srs_error_t SrsTcpClient::connect()
 {
     srs_error_t err = srs_success;
     
-    close();
-    
-    srs_assert(stfd == NULL);
+    srs_netfd_t stfd = NULL;
     if ((err = srs_tcp_connect(host, port, timeout, &stfd)) != srs_success) {
         return srs_error_wrap(err, "tcp: connect %s:%d to=%dms", host.c_str(), port, srsu2msi(timeout));
     }
-    
-    if ((err = io->initialize(stfd)) != srs_success) {
-        return srs_error_wrap(err, "tcp: init socket object");
-    }
+
+    // TODO: FIMXE: The timeout set on io need to be set to new object.
+    srs_freep(io);
+    io = new SrsStSocket(stfd);
+
+    srs_close_stfd(stfd_);
+    stfd_ = stfd;
     
     return err;
-}
-
-void SrsTcpClient::close()
-{
-    // Ignore when already closed.
-    if (!io) {
-        return;
-    }
-    
-    srs_close_stfd(stfd);
 }
 
 void SrsTcpClient::set_recv_timeout(srs_utime_t tm)

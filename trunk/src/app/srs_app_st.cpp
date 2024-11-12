@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_app_st.hpp>
@@ -27,6 +27,30 @@ ISrsStartable::ISrsStartable()
 }
 
 ISrsStartable::~ISrsStartable()
+{
+}
+
+ISrsInterruptable::ISrsInterruptable()
+{
+}
+
+ISrsInterruptable::~ISrsInterruptable()
+{
+}
+
+ISrsContextIdSetter::ISrsContextIdSetter()
+{
+}
+
+ISrsContextIdSetter::~ISrsContextIdSetter()
+{
+}
+
+ISrsContextIdGetter::ISrsContextIdGetter()
+{
+}
+
+ISrsContextIdGetter::~ISrsContextIdGetter()
 {
 }
 
@@ -66,7 +90,12 @@ srs_error_t SrsDummyCoroutine::pull()
 
 const SrsContextId& SrsDummyCoroutine::cid()
 {
-    return _srs_context->get_id();
+    return cid_;
+}
+
+void SrsDummyCoroutine::set_cid(const SrsContextId& cid)
+{
+    cid_ = cid;
 }
 
 SrsSTCoroutine::SrsSTCoroutine(string n, ISrsCoroutineHandler* h)
@@ -112,6 +141,11 @@ srs_error_t SrsSTCoroutine::pull()
 const SrsContextId& SrsSTCoroutine::cid()
 {
     return impl_->cid();
+}
+
+void SrsSTCoroutine::set_cid(const SrsContextId& cid)
+{
+    impl_->set_cid(cid);
 }
 
 SrsFastCoroutine::SrsFastCoroutine(string n, ISrsCoroutineHandler* h)
@@ -257,6 +291,12 @@ const SrsContextId& SrsFastCoroutine::cid()
     return cid_;
 }
 
+void SrsFastCoroutine::set_cid(const SrsContextId& cid)
+{
+    cid_ = cid;
+    srs_context_set_cid_of(trd, cid);
+}
+
 srs_error_t SrsFastCoroutine::cycle()
 {
     if (_srs_context) {
@@ -302,7 +342,12 @@ SrsWaitGroup::SrsWaitGroup()
 
 SrsWaitGroup::~SrsWaitGroup()
 {
-    wait();
+    // In the destructor, we should NOT wait for all coroutines to be done, because user should decide
+    // to wait or not. Similar to the Go's sync.WaitGroup, it also requires user to wait explicitly. For
+    // some special use scenarios, such as error handling, for example, if we started three servers with
+    // wait group, and one of them failed, user may want to return error and quit directly, without wait
+    // for other running servers to be done. If we wait in the destructor, it will continue to run without
+    // some servers, in unknown behaviors.
     srs_cond_destroy(done_);
 }
 
@@ -324,5 +369,71 @@ void SrsWaitGroup::wait()
     if (nn_ > 0) {
         srs_cond_wait(done_);
     }
+}
+
+ISrsExecutorHandler::ISrsExecutorHandler()
+{
+}
+
+ISrsExecutorHandler::~ISrsExecutorHandler()
+{
+}
+
+SrsExecutorCoroutine::SrsExecutorCoroutine(ISrsResourceManager* m, ISrsResource* r, ISrsCoroutineHandler* h, ISrsExecutorHandler* cb)
+{
+    resource_ = r;
+    handler_ = h;
+    manager_ = m;
+    callback_ = cb;
+    trd_ = new SrsSTCoroutine("ar", this, resource_->get_id());
+}
+
+SrsExecutorCoroutine::~SrsExecutorCoroutine()
+{
+    manager_->remove(resource_);
+    srs_freep(trd_);
+}
+
+srs_error_t SrsExecutorCoroutine::start()
+{
+    return trd_->start();
+}
+
+void SrsExecutorCoroutine::interrupt()
+{
+    trd_->interrupt();
+}
+
+srs_error_t SrsExecutorCoroutine::pull()
+{
+    return trd_->pull();
+}
+
+const SrsContextId& SrsExecutorCoroutine::cid()
+{
+    return trd_->cid();
+}
+
+void SrsExecutorCoroutine::set_cid(const SrsContextId& cid)
+{
+    trd_->set_cid(cid);
+}
+
+srs_error_t SrsExecutorCoroutine::cycle()
+{
+    srs_error_t err = handler_->cycle();
+    if (callback_) callback_->on_executor_done(this);
+    manager_->remove(this);
+    return err;
+}
+
+const SrsContextId& SrsExecutorCoroutine::get_id()
+{
+    return resource_->get_id();
+}
+
+std::string SrsExecutorCoroutine::desc()
+{
+    return resource_->desc();
 }
 

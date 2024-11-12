@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_PROTOCOL_HTTP_HPP
@@ -93,6 +93,8 @@ private:
     // header fields, and ending with the entity-header fields.
     // @doc https://tools.ietf.org/html/rfc2616#section-4.2
     std::map<std::string, std::string> headers;
+    // Store keys to keep fields in order.
+    std::vector<std::string> keys_;
 public:
     SrsHttpHeader();
     virtual ~SrsHttpHeader();
@@ -182,7 +184,6 @@ public:
     // @param data, the data to send. NULL to flush header only.
     virtual srs_error_t write(char* data, int size) = 0;
     // for the HTTP FLV, to writev to improve performance.
-    // @see https://github.com/ossrs/srs/issues/405
     virtual srs_error_t writev(const iovec* iov, int iovcnt, ssize_t* pnwrite) = 0;
     
     // WriteHeader sends an HTTP response header with status code.
@@ -203,6 +204,71 @@ public:
 public:
     // Whether response read EOF.
     virtual bool eof() = 0;
+};
+
+// A RequestWriter interface is used by an HTTP handler to
+// construct an HTTP request.
+// Usage 0, request with a message once:
+//      ISrsHttpRequestWriter* w; // create or get request.
+//      std::string msg = "Hello, HTTP!";
+//      w->write((char*)msg.data(), (int)msg.length());
+// Usage 1, request with specified length content, same to #0:
+//      ISrsHttpRequestWriter* w; // create or get request.
+//      std::string msg = "Hello, HTTP!";
+//      w->header()->set_content_type("text/plain; charset=utf-8");
+//      w->header()->set_content_length(msg.length());
+//      w->write_header("POST", "/");
+//      w->write((char*)msg.data(), (int)msg.length()); // write N times, N>0
+//      w->final_request(); // optional flush.
+// Usage 2, request with HTTP code only, zero content length.
+//      ISrsHttpRequestWriter* w; // create or get request.
+//      w->header()->set_content_length(0);
+//      w->write_header("GET", "/");
+//      w->final_request();
+// Usage 3, request in chunked encoding.
+//      ISrsHttpRequestWriter* w; // create or get request.
+//      std::string msg = "Hello, HTTP!";
+//      w->header()->set_content_type("application/octet-stream");
+//      w->write_header("POST", "/");
+//      w->write((char*)msg.data(), (int)msg.length());
+//      w->write((char*)msg.data(), (int)msg.length());
+//      w->write((char*)msg.data(), (int)msg.length());
+//      w->write((char*)msg.data(), (int)msg.length());
+//      w->final_request(); // required to end the chunked and flush.
+class ISrsHttpRequestWriter
+{
+public:
+    ISrsHttpRequestWriter();
+    virtual ~ISrsHttpRequestWriter();
+public:
+    // When chunked mode,
+    // final the request to complete the chunked encoding.
+    // For no-chunked mode,
+    // final to send request, for example, content-length is 0.
+    virtual srs_error_t final_request() = 0;
+
+    // Header returns the header map that will be sent by WriteHeader.
+    // Changing the header after a call to WriteHeader (or Write) has
+    // no effect.
+    virtual SrsHttpHeader* header() = 0;
+
+    // Write writes the data to the connection as part of an HTTP reply.
+    // If WriteHeader has not yet been called, Write calls WriteHeader(http.StatusOK)
+    // before writing the data.  If the Header does not contain a
+    // Content-Type line, Write adds a Content-Type set to the result of passing
+    // The initial 512 bytes of written data to DetectContentType.
+    // @param data, the data to send. NULL to flush header only.
+    virtual srs_error_t write(char* data, int size) = 0;
+    // for the HTTP FLV, to writev to improve performance.
+    virtual srs_error_t writev(const iovec* iov, int iovcnt, ssize_t* pnwrite) = 0;
+
+    // WriteHeader sends an HTTP request header with status code.
+    // If WriteHeader is not called explicitly, the first call to Write
+    // will trigger an implicit WriteHeader(http.StatusOK).
+    // Thus explicit calls to WriteHeader are mainly used to
+    // send error codes.
+    // @remark, user must set header then write or write_header.
+    virtual void write_header(const std::string& method, const std::string& path) = 0;
 };
 
 // Objects implementing the Handler interface can be
@@ -286,6 +352,7 @@ private:
     virtual srs_error_t serve_flv_file(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string fullpath);
     virtual srs_error_t serve_mp4_file(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string fullpath);
     virtual srs_error_t serve_m3u8_file(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string fullpath);
+    virtual srs_error_t serve_ts_file(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string fullpath);
 protected:
     // When access flv file with x.flv?start=xxx
     virtual srs_error_t serve_flv_stream(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string fullpath, int64_t offset);
@@ -304,6 +371,7 @@ protected:
     // Remark 2:
     //           If use two same "hls_ctx" in different requests, SRS cannot detect so that they will be treated as one.
     virtual srs_error_t serve_m3u8_ctx(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string fullpath);
+    virtual srs_error_t serve_ts_ctx(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string fullpath);
 protected:
     // Copy the fs to response writer in size bytes.
     virtual srs_error_t copy(ISrsHttpResponseWriter* w, SrsFileReader* fs, ISrsHttpMessage* r, int64_t size);
@@ -337,13 +405,14 @@ public:
 };
 
 // The server mux, all http server should implements it.
-class ISrsHttpServeMux
+class ISrsHttpServeMux : public ISrsHttpHandler
 {
 public:
     ISrsHttpServeMux();
     virtual ~ISrsHttpServeMux();
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r) = 0;
+    // Register HTTP handler to mux.
+    virtual srs_error_t handle(std::string pattern, ISrsHttpHandler* handler) = 0;
 };
 
 // ServeMux is an HTTP request multiplexer.
@@ -401,6 +470,8 @@ public:
     // Handle registers the handler for the given pattern.
     // If a handler already exists for pattern, Handle panics.
     virtual srs_error_t handle(std::string pattern, ISrsHttpHandler* handler);
+    // Remove the handler for pattern. Note that this will not free the handler.
+    void unhandle(std::string pattern, ISrsHttpHandler* handler);
 // Interface ISrsHttpServeMux
 public:
     virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
@@ -411,22 +482,44 @@ private:
     virtual bool path_match(std::string pattern, std::string path);
 };
 
-// The filter http mux, directly serve the http CORS requests,
-// while proxy to the worker mux for services.
-class SrsHttpCorsMux : public ISrsHttpServeMux
+// The filter http mux, directly serve the http CORS requests
+class SrsHttpCorsMux : public ISrsHttpHandler
 {
 private:
     bool required;
     bool enabled;
-    ISrsHttpServeMux* next;
+    ISrsHttpHandler* next_;
 public:
-    SrsHttpCorsMux();
+    SrsHttpCorsMux(ISrsHttpHandler* h);
     virtual ~SrsHttpCorsMux();
 public:
-    virtual srs_error_t initialize(ISrsHttpServeMux* worker, bool cros_enabled);
+    virtual srs_error_t initialize(bool cros_enabled);
 // Interface ISrsHttpServeMux
 public:
     virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+};
+
+// The filter http mux, directly serve the http AUTH requests,
+// while proxy to the worker mux for services.
+// @see https://www.rfc-editor.org/rfc/rfc7617
+// @see https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/WWW-Authenticate
+class SrsHttpAuthMux : public ISrsHttpHandler
+{
+private:
+    bool enabled_;
+    std::string username_;
+    std::string password_;
+    ISrsHttpHandler* next_;
+public:
+    SrsHttpAuthMux(ISrsHttpHandler* h);
+    virtual ~SrsHttpAuthMux();
+public:
+    virtual srs_error_t initialize(bool enabled, std::string username, std::string password);
+// Interface ISrsHttpServeMux
+public:
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+private:
+    virtual srs_error_t do_auth(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
 };
 
 // A Request represents an HTTP request received by a server
@@ -450,6 +543,7 @@ public:
     ISrsHttpMessage();
     virtual ~ISrsHttpMessage();
 public:
+    virtual uint8_t message_type() = 0;
     virtual uint8_t method() = 0;
     virtual uint16_t status_code() = 0;
     // Method helpers.
@@ -502,12 +596,13 @@ public:
 class SrsHttpUri
 {
 private:
-    std::string url;
+    std::string url_;
     std::string schema;
     std::string host;
     int port;
     std::string path;
     std::string query;
+    std::string fragment_;
     std::string username_;
     std::string password_;
     std::map<std::string, std::string> query_values_;
@@ -527,12 +622,13 @@ public:
     virtual std::string get_path();
     virtual std::string get_query();
     virtual std::string get_query_by_key(std::string key);
+    virtual std::string get_fragment();
     virtual std::string username();
     virtual std::string password();
 private:
     // Get the parsed url field.
     // @return return empty string if not set.
-    virtual std::string get_uri_field(std::string uri, void* hp_u, int field);
+    virtual std::string get_uri_field(const std::string& uri, void* hp_u, int field);
     srs_error_t parse_query();
 public:
     static std::string query_escape(std::string s);
@@ -778,6 +874,12 @@ enum http_status
   XX(32, UNLINK,      UNLINK)       \
   /* icecast */                     \
   XX(33, SOURCE,      SOURCE)       \
+  /* SIP https://www.ietf.org/rfc/rfc3261.html */ \
+  XX(34, REGISTER,    REGISTER)     \
+  XX(35, INVITE,      INVITE)       \
+  XX(36, ACK,         ACK)          \
+  XX(37, MESSAGE,     MESSAGE)      \
+  XX(38, BYE,         BYE)          \
 
 enum http_method
   {

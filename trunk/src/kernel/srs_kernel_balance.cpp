@@ -1,10 +1,12 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_kernel_balance.hpp>
+
+#include <srs_kernel_error.hpp>
 
 using namespace std;
 

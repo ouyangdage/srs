@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_PROTOCOL_CONN_HPP
@@ -10,6 +10,7 @@
 #include <srs_core.hpp>
 
 #include <string>
+#include <vector>
 
 // The resource managed by ISrsResourceManager.
 class ISrsResource
@@ -20,8 +21,9 @@ public:
 public:
     // Get the context id of connection.
     virtual const SrsContextId& get_id() = 0;
+public:
     // The resource description, optional.
-    virtual std::string desc() = 0;
+    virtual std::string desc();
 };
 
 // The manager for resource.
@@ -31,7 +33,9 @@ public:
     ISrsResourceManager();
     virtual ~ISrsResourceManager();
 public:
-    // Remove then free the specified connection.
+    // Remove then free the specified connection. Note that the manager always free c resource,
+    // in the same coroutine or another coroutine. Some manager may support add c to a map, it
+    // should always free it even if it's in the map.
     virtual void remove(ISrsResource* c) = 0;
 };
 

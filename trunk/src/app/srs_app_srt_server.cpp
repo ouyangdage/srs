@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_app_srt_server.hpp>
@@ -13,6 +13,7 @@ using namespace std;
 #include <srs_protocol_log.hpp>
 #include <srs_app_config.hpp>
 #include <srs_app_srt_conn.hpp>
+#include <srs_app_statistic.hpp>
 
 #ifdef SRS_SRT
 SrsSrtEventLoop* _srt_eventloop = NULL;
@@ -65,51 +66,63 @@ srs_error_t SrsSrtAcceptor::set_srt_opt()
     srs_error_t err = srs_success;
 
     if ((err = srs_srt_set_maxbw(listener_->fd(), _srs_config->get_srto_maxbw())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt maxbw=%" PRId64 " failed", _srs_config->get_srto_maxbw());
     }
 
     if ((err = srs_srt_set_mss(listener_->fd(), _srs_config->get_srto_mss())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt mss=%d failed", _srs_config->get_srto_mss());
     }
 
     if ((err = srs_srt_set_tsbpdmode(listener_->fd(), _srs_config->get_srto_tsbpdmode())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt tsbpdmode=%d failed", _srs_config->get_srto_tsbpdmode());
     }
 
     if ((err = srs_srt_set_latency(listener_->fd(), _srs_config->get_srto_latency())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt latency=%d failed", _srs_config->get_srto_latency());
     }
 
     if ((err = srs_srt_set_rcv_latency(listener_->fd(), _srs_config->get_srto_recv_latency())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt recvlatency=%d failed", _srs_config->get_srto_recv_latency());
     }
 
     if ((err = srs_srt_set_peer_latency(listener_->fd(), _srs_config->get_srto_peer_latency())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt peerlatency=%d failed", _srs_config->get_srto_peer_latency());
     }
 
     if ((err = srs_srt_set_tlpktdrop(listener_->fd(), _srs_config->get_srto_tlpktdrop())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt tlpktdrop=%d failed", _srs_config->get_srto_tlpktdrop());
     }
 
     if ((err = srs_srt_set_connect_timeout(listener_->fd(), srsu2msi(_srs_config->get_srto_conntimeout()))) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt connect_timeout=%d failed", _srs_config->get_srto_conntimeout());
     }
 
     if ((err = srs_srt_set_peer_idle_timeout(listener_->fd(), srsu2msi(_srs_config->get_srto_peeridletimeout()))) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt peer_idle_timeout=%d failed", _srs_config->get_srto_peeridletimeout());
     }
 
     if ((err = srs_srt_set_sndbuf(listener_->fd(), _srs_config->get_srto_sendbuf())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt sendbuf=%d failed", _srs_config->get_srto_sendbuf());
     }
 
     if ((err = srs_srt_set_rcvbuf(listener_->fd(), _srs_config->get_srto_recvbuf())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt recvbuf=%d failed", _srs_config->get_srto_recvbuf());
     }
 
     if ((err = srs_srt_set_payload_size(listener_->fd(), _srs_config->get_srto_payloadsize())) != srs_success) {
-        return srs_error_wrap(err, "set opt");
+        return srs_error_wrap(err, "set opt payload_size=%d failed", _srs_config->get_srto_payloadsize());
+    }
+
+    string passphrase = _srs_config->get_srto_passphrase();
+    if (! passphrase.empty()) {
+        if ((err = srs_srt_set_passphrase(listener_->fd(), passphrase)) != srs_success) {
+            return srs_error_wrap(err, "set opt passphrase=%s failed", passphrase.c_str());
+        }
+
+        int pbkeylen = _srs_config->get_srto_pbkeylen();
+        if ((err = srs_srt_set_pbkeylen(listener_->fd(), pbkeylen)) != srs_success) {
+            return srs_error_wrap(err, "set opt pbkeylen=%d failed", pbkeylen);
+        }
     }
 
     return err;
@@ -131,16 +144,27 @@ srs_error_t SrsSrtAcceptor::on_srt_client(srs_srt_t srt_fd)
 SrsSrtServer::SrsSrtServer()
 {
     conn_manager_ = new SrsResourceManager("SRT", true);
+    timer_ = NULL;
 }
 
 SrsSrtServer::~SrsSrtServer()
 {
     srs_freep(conn_manager_);
+    srs_freep(timer_);
 }
 
 srs_error_t SrsSrtServer::initialize()
 {
     srs_error_t err = srs_success;
+
+    if (! _srs_config->get_srt_enabled()) {
+        return err;
+    }
+
+    if ((err = setup_ticks()) != srs_success) {
+        return srs_error_wrap(err, "tick");
+    }
+
     return err;
 }
 
@@ -200,18 +224,19 @@ srs_error_t SrsSrtServer::accept_srt_client(srs_srt_t srt_fd)
 {
     srs_error_t err = srs_success;
 
-    ISrsStartableConneciton* conn = NULL;
-    if ((err = fd_to_resource(srt_fd, &conn)) != srs_success) {
+    ISrsResource* resource = NULL;
+    if ((err = fd_to_resource(srt_fd, &resource)) != srs_success) {
         //close fd on conn error, otherwise will lead to fd leak -gs
         // TODO: FIXME: Handle error.
         srs_srt_close(srt_fd);
         return srs_error_wrap(err, "srt fd to resource");
     }
-    srs_assert(conn);
+    srs_assert(resource);
     
     // directly enqueue, the cycle thread will remove the client.
-    conn_manager_->add(conn);
+    conn_manager_->add(resource);
 
+    ISrsStartable* conn = dynamic_cast<ISrsStartable*>(resource);
     if ((err = conn->start()) != srs_success) {
         return srs_error_wrap(err, "start srt conn coroutine");
     }
@@ -219,7 +244,7 @@ srs_error_t SrsSrtServer::accept_srt_client(srs_srt_t srt_fd)
     return err;
 }
 
-srs_error_t SrsSrtServer::fd_to_resource(srs_srt_t srt_fd, ISrsStartableConneciton** pr)
+srs_error_t SrsSrtServer::fd_to_resource(srs_srt_t srt_fd, ISrsResource** pr)
 {
     srs_error_t err = srs_success;
     
@@ -242,15 +267,54 @@ srs_error_t SrsSrtServer::fd_to_resource(srs_srt_t srt_fd, ISrsStartableConnecit
 
 void SrsSrtServer::remove(ISrsResource* c)
 {
-    // TODO: FIXME: add some statistic of srt.
-    // ISrsStartableConneciton* conn = dynamic_cast<ISrsStartableConneciton*>(c);
-
-    // SrsStatistic* stat = SrsStatistic::instance();
-    // stat->kbps_add_delta(c->get_id().c_str(), conn);
-    // stat->on_disconnect(c->get_id().c_str());
-
     // use manager to free it async.
     conn_manager_->remove(c);
+}
+
+srs_error_t SrsSrtServer::setup_ticks()
+{
+    srs_error_t err = srs_success;
+
+    srs_freep(timer_);
+    timer_ = new SrsHourGlass("srt", this, 1 * SRS_UTIME_SECONDS);
+
+    if (_srs_config->get_stats_enabled()) {
+        if ((err = timer_->tick(8, 3 * SRS_UTIME_SECONDS)) != srs_success) {
+            return srs_error_wrap(err, "tick");
+        }
+    }
+
+    if ((err = timer_->start()) != srs_success) {
+        return srs_error_wrap(err, "timer");
+    }
+
+    return err;
+}
+
+srs_error_t SrsSrtServer::notify(int event, srs_utime_t interval, srs_utime_t tick)
+{
+    srs_error_t err = srs_success;
+
+    switch (event) {
+        case 8: resample_kbps(); break;
+    }
+
+    return err;
+}
+
+void SrsSrtServer::resample_kbps()
+{
+    // collect delta from all clients.
+    for (int i = 0; i < (int)conn_manager_->size(); i++) {
+        ISrsResource* c = conn_manager_->at(i);
+
+        SrsMpegtsSrtConn* conn = dynamic_cast<SrsMpegtsSrtConn*>(c);
+        srs_assert(conn);
+
+        // add delta of connection to server kbps.,
+        // for next sample() of server kbps can get the stat.
+        SrsStatistic::instance()->kbps_add_delta(c->get_id().c_str(), conn->delta());
+    }
 }
 
 SrsSrtServerAdapter::SrsSrtServerAdapter()
@@ -267,7 +331,7 @@ srs_error_t SrsSrtServerAdapter::initialize()
 {
     srs_error_t err = srs_success;
 
-    if ((err = srs_srt_log_initialie()) != srs_success) {
+    if ((err = srs_srt_log_initialize()) != srs_success) {
         return srs_error_wrap(err, "srt log initialize");
     }
 
@@ -349,7 +413,7 @@ srs_error_t SrsSrtEventLoop::start()
 srs_error_t SrsSrtEventLoop::cycle()
 {
     srs_error_t err = srs_success;
-    
+
     while (true) {
         if ((err = trd_->pull()) != srs_success) {
             return srs_error_wrap(err, "srt listener");

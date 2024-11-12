@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #ifndef SRS_APP_HTTP_CONN_HPP
@@ -36,6 +36,7 @@ class SrsHttpUri;
 class SrsHttpMessage;
 class SrsHttpStreamServer;
 class SrsHttpStaticServer;
+class SrsNetworkDelta;
 
 // The owner of HTTP connection.
 class ISrsHttpConnOwner
@@ -57,14 +58,16 @@ public:
     virtual srs_error_t on_conn_done(srs_error_t r0) = 0;
 };
 
+// TODO: FIXME: Should rename to roundtrip or responder, not connection.
 // The http connection which request the static or stream content.
-class SrsHttpConn : public ISrsStartableConneciton, public ISrsCoroutineHandler
+class SrsHttpConn : public ISrsConnection, public ISrsStartable, public ISrsCoroutineHandler
     , public ISrsExpire
 {
 protected:
     SrsHttpParser* parser;
     ISrsHttpServeMux* http_mux;
     SrsHttpCorsMux* cors;
+    SrsHttpAuthMux* auth;
     ISrsHttpConnOwner* handler_;
 protected:
     ISrsProtocolReadWriter* skt;
@@ -75,12 +78,8 @@ protected:
     std::string ip;
     int port;
 private:
-    // The connection total kbps.
-    // not only the rtmp or http connection, all type of connection are
-    // need to statistic the kbps of io.
-    // The SrsStatistic will use it indirectly to statistic the bytes delta of current connection.
-    SrsKbps* kbps;
-    SrsWallClock* clk;
+    // The delta for statistic.
+    SrsNetworkDelta* delta_;
     // The create time in milliseconds.
     // for current connection to log self create time and calculate the living time.
     int64_t create_time;
@@ -90,13 +89,12 @@ public:
 // Interface ISrsResource.
 public:
     virtual std::string desc();
-// Interface ISrsKbpsDelta
 public:
-    virtual void remark(int64_t* in, int64_t* out);
+    ISrsKbpsDelta* delta();
 // Interface ISrsStartable
 public:
     virtual srs_error_t start();
-// Interface ISrsOneCycleThreadHandler
+// Interface ISrsCoroutineHandler
 public:
     virtual srs_error_t cycle();
 private:
@@ -114,6 +112,8 @@ public:
     virtual srs_error_t pull();
     // Whether enable the CORS(cross-domain).
     virtual srs_error_t set_crossdomain_enabled(bool v);
+    // Whether enable the Auth.
+    virtual srs_error_t set_auth_enabled(bool auth_enabled);
     // Whether enable the JSONP.
     virtual srs_error_t set_jsonp(bool v);
 // Interface ISrsConnection.
@@ -126,40 +126,38 @@ public:
 };
 
 // Drop body of request, only process the response.
-class SrsResponseOnlyHttpConn : public ISrsStartableConneciton, public ISrsHttpConnOwner
-    , public ISrsReloadHandler
+class SrsHttpxConn : public ISrsConnection, public ISrsStartable, public ISrsHttpConnOwner, public ISrsReloadHandler
 {
 private:
     // The manager object to manage the connection.
     ISrsResourceManager* manager;
-    SrsTcpConnection* skt;
+    ISrsProtocolReadWriter* io_;
     SrsSslConnection* ssl;
     SrsHttpConn* conn;
+    // We should never enable the stat, unless HTTP stream connection requires.
+    bool enable_stat_;
+    // ssl key & cert file
+    const std::string ssl_key_file_;
+    const std::string ssl_cert_file_;
+    
 public:
-    SrsResponseOnlyHttpConn(bool https, ISrsResourceManager* cm, srs_netfd_t fd, ISrsHttpServeMux* m, std::string cip, int port);
-    virtual ~SrsResponseOnlyHttpConn();
+    SrsHttpxConn(ISrsResourceManager* cm, ISrsProtocolReadWriter* io, ISrsHttpServeMux* m, std::string cip, int port, std::string key, std::string cert);
+    virtual ~SrsHttpxConn();
 public:
+    // Require statistic about HTTP connection, for HTTP streaming clients only.
+    void set_enable_stat(bool v);
     // Directly read a HTTP request message.
     // It's exported for HTTP stream, such as HTTP FLV, only need to write to client when
     // serving it, but we need to start a thread to read message to detect whether FD is closed.
     // @see https://github.com/ossrs/srs/issues/636#issuecomment-298208427
     // @remark Should only used in HTTP-FLV streaming connection.
     virtual srs_error_t pop_message(ISrsHttpMessage** preq);
-// Interface ISrsReloadHandler
-public:
-    virtual srs_error_t on_reload_http_stream_crossdomain();
 // Interface ISrsHttpConnOwner.
 public:
     virtual srs_error_t on_start();
     virtual srs_error_t on_http_message(ISrsHttpMessage* r, SrsHttpResponseWriter* w);
     virtual srs_error_t on_message_done(ISrsHttpMessage* r, SrsHttpResponseWriter* w);
     virtual srs_error_t on_conn_done(srs_error_t r0);
-// Extract APIs from SrsTcpConnection.
-public:
-    // Set socket option TCP_NODELAY.
-    virtual srs_error_t set_tcp_nodelay(bool v);
-    // Set socket option SO_SNDBUF in srs_utime_t.
-    virtual srs_error_t set_socket_buffer(srs_utime_t buffer_v);
 // Interface ISrsResource.
 public:
     virtual std::string desc();
@@ -170,9 +168,8 @@ public:
 // Interface ISrsStartable
 public:
     virtual srs_error_t start();
-// Interface ISrsKbpsDelta
 public:
-    virtual void remark(int64_t* in, int64_t* out);
+    ISrsKbpsDelta* delta();
 };
 
 // The http server, use http stream or static server to serve requests.
@@ -189,10 +186,13 @@ public:
     virtual srs_error_t initialize();
 // Interface ISrsHttpServeMux
 public:
+    virtual srs_error_t handle(std::string pattern, ISrsHttpHandler* handler);
+// Interface ISrsHttpHandler
+public:
     virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
 public:
-    virtual srs_error_t http_mount(SrsLiveSource* s, SrsRequest* r);
-    virtual void http_unmount(SrsLiveSource* s, SrsRequest* r);
+    virtual srs_error_t http_mount(SrsRequest* r);
+    virtual void http_unmount(SrsRequest* r);
 };
 
 #endif

@@ -1,7 +1,7 @@
 .PHONY: clean
 
 LDLIBS=../../obj/libst.a
-CFLAGS=-g -O0
+CFLAGS=-g -O0 -I../../obj
 
 OS_NAME 	= $(shell uname -s)
 ST_TARGET 	= linux-debug
@@ -13,7 +13,7 @@ CFLAGS      += -arch $(CPU_ARCHS)
 endif
 
 ./verify:  verify.c $(LDLIBS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Wall -o verify verify.c $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Wall -o $@ $^ $(LDLIBS)
 
 clean:
 	cd ../.. && make clean

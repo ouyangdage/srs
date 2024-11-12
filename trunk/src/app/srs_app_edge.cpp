@@ -1,7 +1,7 @@
 //
-// Copyright (c) 2013-2022 The SRS Authors
+// Copyright (c) 2013-2024 The SRS Authors
 //
-// SPDX-License-Identifier: MIT or MulanPSL-2.0
+// SPDX-License-Identifier: MIT
 //
 
 #include <srs_app_edge.hpp>
@@ -34,6 +34,8 @@ using namespace std;
 #include <srs_kernel_flv.hpp>
 #include <srs_kernel_buffer.hpp>
 #include <srs_protocol_amf0.hpp>
+#include <srs_app_http_client.hpp>
+#include <srs_app_tencentcloud.hpp>
 
 // when edge timeout, retry next.
 #define SRS_EDGE_INGESTER_TIMEOUT (5 * SRS_UTIME_SECONDS)
@@ -107,7 +109,13 @@ srs_error_t SrsEdgeRtmpUpstream::connect(SrsRequest* r, SrsLbRoundRobin* lb)
     srs_utime_t cto = SRS_EDGE_INGESTER_TIMEOUT;
     srs_utime_t sto = SRS_CONSTS_RTMP_PULSE;
     sdk = new SrsSimpleRtmpClient(url, cto, sto);
-    
+
+#ifdef SRS_APM
+    // Create a client span and store it to an AMF0 propagator.
+    SrsUniquePtr<ISrsApmSpan> span_client(_srs_apm->inject(_srs_apm->span("edge-pull")->set_kind(SrsApmKindClient)
+        ->as_child(_srs_apm->load()), sdk->extra_args()));
+#endif
+
     if ((err = sdk->connect()) != srs_success) {
         return srs_error_wrap(err, "edge pull %s failed, cto=%dms, sto=%dms.", url.c_str(), srsu2msi(cto), srsu2msi(sto));
     }
@@ -150,7 +158,7 @@ void SrsEdgeRtmpUpstream::set_recv_timeout(srs_utime_t tm)
     sdk->set_recv_timeout(tm);
 }
 
-void SrsEdgeRtmpUpstream::kbps_sample(const char* label, int64_t age)
+void SrsEdgeRtmpUpstream::kbps_sample(const char* label, srs_utime_t age)
 {
     sdk->kbps_sample(label, age);
 }
@@ -193,7 +201,6 @@ srs_error_t SrsEdgeFlvUpstream::do_connect(SrsRequest* r, SrsLbRoundRobin* lb, i
     if (redirect_depth == 0) {
         SrsConfDirective* conf = _srs_config->get_vhost_edge_origin(req->vhost);
 
-        // @see https://github.com/ossrs/srs/issues/79
         // when origin is error, for instance, server is shutdown,
         // then user remove the vhost then reload, the conf is empty.
         if (!conf) {
@@ -377,16 +384,19 @@ void SrsEdgeFlvUpstream::set_recv_timeout(srs_utime_t tm)
     sdk_->set_recv_timeout(tm);
 }
 
-void SrsEdgeFlvUpstream::kbps_sample(const char* label, int64_t age)
+void SrsEdgeFlvUpstream::kbps_sample(const char* label, srs_utime_t age)
 {
     sdk_->kbps_sample(label, age);
 }
 
 SrsEdgeIngester::SrsEdgeIngester()
 {
-    source = NULL;
+    source_ = NULL;
     edge = NULL;
     req = NULL;
+#ifdef SRS_APM
+    span_main_ = NULL;
+#endif
     
     upstream = new SrsEdgeRtmpUpstream("");
     lb = new SrsLbRoundRobin();
@@ -396,18 +406,30 @@ SrsEdgeIngester::SrsEdgeIngester()
 SrsEdgeIngester::~SrsEdgeIngester()
 {
     stop();
-    
+
+#ifdef SRS_APM
+    srs_freep(span_main_);
+#endif
     srs_freep(upstream);
     srs_freep(lb);
     srs_freep(trd);
 }
 
-srs_error_t SrsEdgeIngester::initialize(SrsLiveSource* s, SrsPlayEdge* e, SrsRequest* r)
+srs_error_t SrsEdgeIngester::initialize(SrsSharedPtr<SrsLiveSource> s, SrsPlayEdge* e, SrsRequest* r)
 {
-    source = s;
+    // Because source references to this object, so we should directly use the source ptr.
+    source_ = s.get();
+
     edge = e;
     req = r;
-    
+
+#ifdef SRS_APM
+    // We create a dedicate span for edge ingester, and all players will link to this one.
+    // Note that we use a producer span and end it immediately.
+    srs_assert(!span_main_);
+    span_main_ = _srs_apm->span("edge")->set_kind(SrsApmKindProducer)->end();
+#endif
+
     return srs_success;
 }
 
@@ -415,7 +437,7 @@ srs_error_t SrsEdgeIngester::start()
 {
     srs_error_t err = srs_success;
     
-    if ((err = source->on_publish()) != srs_success) {
+    if ((err = source_->on_publish()) != srs_success) {
         return srs_error_wrap(err, "notify source");
     }
     
@@ -433,10 +455,10 @@ void SrsEdgeIngester::stop()
 {
     trd->stop();
     upstream->close();
-    
-    // notice to unpublish.
-    if (source) {
-        source->on_unpublish();
+
+    // Notify source to un-publish if exists.
+    if (source_) {
+        source_->on_unpublish();
     }
 }
 
@@ -445,12 +467,27 @@ string SrsEdgeIngester::get_curr_origin()
     return lb->selected();
 }
 
+#ifdef SRS_APM
+ISrsApmSpan* SrsEdgeIngester::span()
+{
+    srs_assert(span_main_);
+    return span_main_;
+}
+#endif
+
 // when error, edge ingester sleep for a while and retry.
 #define SRS_EDGE_INGESTER_CIMS (3 * SRS_UTIME_SECONDS)
 
 srs_error_t SrsEdgeIngester::cycle()
 {
     srs_error_t err = srs_success;
+
+#ifdef SRS_APM
+    // Save span from parent coroutine to current coroutine context, so that we can load if in this coroutine, for
+    // example to use it in SrsEdgeRtmpUpstream which use RTMP or FLV client to connect to upstream server.
+    _srs_apm->store(span_main_);
+    srs_assert(span_main_);
+#endif
     
     while (true) {
         // We always check status first.
@@ -459,9 +496,26 @@ srs_error_t SrsEdgeIngester::cycle()
             return srs_error_wrap(err, "edge ingester");
         }
 
+#ifdef SRS_APM
+        srs_assert(span_main_);
+        ISrsApmSpan* start = _srs_apm->span("edge-start")->set_kind(SrsApmKindConsumer)->as_child(span_main_)->end();
+        srs_freep(start);
+#endif
+
         if ((err = do_cycle()) != srs_success) {
             srs_warn("EdgeIngester: Ignore error, %s", srs_error_desc(err).c_str());
             srs_freep(err);
+        }
+
+#ifdef SRS_APM
+        srs_assert(span_main_);
+        ISrsApmSpan* stop = _srs_apm->span("edge-stop")->set_kind(SrsApmKindConsumer)->as_child(span_main_)->end();
+        srs_freep(stop);
+#endif
+
+        // Check whether coroutine is stopped, see https://github.com/ossrs/srs/issues/2901
+        if ((err = trd->pull()) != srs_success) {
+            return srs_error_wrap(err, "edge ingester");
         }
 
         srs_usleep(SRS_EDGE_INGESTER_CIMS);
@@ -497,7 +551,7 @@ srs_error_t SrsEdgeIngester::do_cycle()
             upstream = new SrsEdgeRtmpUpstream(redirect);
         }
         
-        if ((err = source->on_source_id_changed(_srs_context->get_id())) != srs_success) {
+        if ((err = source_->on_source_id_changed(_srs_context->get_id())) != srs_success) {
             return srs_error_wrap(err, "on source id changed");
         }
         
@@ -540,9 +594,8 @@ srs_error_t SrsEdgeIngester::do_cycle()
 srs_error_t SrsEdgeIngester::ingest(string& redirect)
 {
     srs_error_t err = srs_success;
-    
-    SrsPithyPrint* pprint = SrsPithyPrint::create_edge();
-    SrsAutoFree(SrsPithyPrint, pprint);
+
+    SrsUniquePtr<SrsPithyPrint> pprint(SrsPithyPrint::create_edge());
 
     // we only use the redict once.
     // reset the redirect to empty, for maybe the origin changed.
@@ -561,15 +614,15 @@ srs_error_t SrsEdgeIngester::ingest(string& redirect)
         }
         
         // read from client.
-        SrsCommonMessage* msg = NULL;
-        if ((err = upstream->recv_message(&msg)) != srs_success) {
+        SrsCommonMessage* msg_raw = NULL;
+        if ((err = upstream->recv_message(&msg_raw)) != srs_success) {
             return srs_error_wrap(err, "recv message");
         }
         
-        srs_assert(msg);
-        SrsAutoFree(SrsCommonMessage, msg);
-        
-        if ((err = process_publish_message(msg, redirect)) != srs_success) {
+        srs_assert(msg_raw);
+        SrsUniquePtr<SrsCommonMessage> msg(msg_raw);
+
+        if ((err = process_publish_message(msg.get(), redirect)) != srs_success) {
             return srs_error_wrap(err, "process message");
         }
     }
@@ -583,21 +636,21 @@ srs_error_t SrsEdgeIngester::process_publish_message(SrsCommonMessage* msg, stri
     
     // process audio packet
     if (msg->header.is_audio()) {
-        if ((err = source->on_audio(msg)) != srs_success) {
+        if ((err = source_->on_audio(msg)) != srs_success) {
             return srs_error_wrap(err, "source consume audio");
         }
     }
     
     // process video packet
     if (msg->header.is_video()) {
-        if ((err = source->on_video(msg)) != srs_success) {
+        if ((err = source_->on_video(msg)) != srs_success) {
             return srs_error_wrap(err, "source consume video");
         }
     }
     
     // process aggregate packet
     if (msg->header.is_aggregate()) {
-        if ((err = source->on_aggregate(msg)) != srs_success) {
+        if ((err = source_->on_aggregate(msg)) != srs_success) {
             return srs_error_wrap(err, "source consume aggregate");
         }
         return err;
@@ -605,15 +658,15 @@ srs_error_t SrsEdgeIngester::process_publish_message(SrsCommonMessage* msg, stri
     
     // process onMetaData
     if (msg->header.is_amf0_data() || msg->header.is_amf3_data()) {
-        SrsPacket* pkt = NULL;
-        if ((err = upstream->decode_message(msg, &pkt)) != srs_success) {
+        SrsPacket* pkt_raw = NULL;
+        if ((err = upstream->decode_message(msg, &pkt_raw)) != srs_success) {
             return srs_error_wrap(err, "decode message");
         }
-        SrsAutoFree(SrsPacket, pkt);
+        SrsUniquePtr<SrsPacket> pkt(pkt_raw);
         
-        if (dynamic_cast<SrsOnMetaDataPacket*>(pkt)) {
-            SrsOnMetaDataPacket* metadata = dynamic_cast<SrsOnMetaDataPacket*>(pkt);
-            if ((err = source->on_meta_data(msg, metadata)) != srs_success) {
+        if (dynamic_cast<SrsOnMetaDataPacket*>(pkt.get())) {
+            SrsOnMetaDataPacket* metadata = dynamic_cast<SrsOnMetaDataPacket*>(pkt.get());
+            if ((err = source_->on_meta_data(msg, metadata)) != srs_success) {
                 return srs_error_wrap(err, "source consume metadata");
             }
             return err;
@@ -624,15 +677,15 @@ srs_error_t SrsEdgeIngester::process_publish_message(SrsCommonMessage* msg, stri
     
     // call messages, for example, reject, redirect.
     if (msg->header.is_amf0_command() || msg->header.is_amf3_command()) {
-        SrsPacket* pkt = NULL;
-        if ((err = upstream->decode_message(msg, &pkt)) != srs_success) {
+        SrsPacket* pkt_raw = NULL;
+        if ((err = upstream->decode_message(msg, &pkt_raw)) != srs_success) {
             return srs_error_wrap(err, "decode message");
         }
-        SrsAutoFree(SrsPacket, pkt);
+        SrsUniquePtr<SrsPacket> pkt(pkt_raw);
         
         // RTMP 302 redirect
-        if (dynamic_cast<SrsCallPacket*>(pkt)) {
-            SrsCallPacket* call = dynamic_cast<SrsCallPacket*>(pkt);
+        if (dynamic_cast<SrsCallPacket*>(pkt.get())) {
+            SrsCallPacket* call = dynamic_cast<SrsCallPacket*>(pkt.get());
             if (!call->arguments->is_object()) {
                 return err;
             }
@@ -673,7 +726,7 @@ SrsEdgeForwarder::SrsEdgeForwarder()
     edge = NULL;
     req = NULL;
     send_error_code = ERROR_SUCCESS;
-    source = NULL;
+    source_ = NULL;
     
     sdk = NULL;
     lb = new SrsLbRoundRobin();
@@ -695,12 +748,14 @@ void SrsEdgeForwarder::set_queue_size(srs_utime_t queue_size)
     return queue->set_queue_size(queue_size);
 }
 
-srs_error_t SrsEdgeForwarder::initialize(SrsLiveSource* s, SrsPublishEdge* e, SrsRequest* r)
+srs_error_t SrsEdgeForwarder::initialize(SrsSharedPtr<SrsLiveSource> s, SrsPublishEdge* e, SrsRequest* r)
 {
-    source = s;
+    // Because source references to this object, so we should directly use the source ptr.
+    source_ = s.get();
+
     edge = e;
     req = r;
-    
+
     return srs_success;
 }
 
@@ -727,12 +782,23 @@ srs_error_t SrsEdgeForwarder::start()
         
         url = srs_generate_rtmp_url(server, port, req->host, vhost, req->app, req->stream, req->param);
     }
+
+    // We must stop the coroutine before disposing the sdk.
+    srs_freep(trd);
+    trd = new SrsSTCoroutine("edge-fwr", this, _srs_context->get_id());
     
     // open socket.
     srs_freep(sdk);
     srs_utime_t cto = SRS_EDGE_FORWARDER_TIMEOUT;
     srs_utime_t sto = SRS_CONSTS_RTMP_TIMEOUT;
     sdk = new SrsSimpleRtmpClient(url, cto, sto);
+
+#ifdef SRS_APM
+    // Create a client span and store it to an AMF0 propagator.
+    // Note that we are able to load the span from coroutine context because in the same coroutine.
+    SrsUniquePtr<ISrsApmSpan> span_client(_srs_apm->inject(_srs_apm->span("edge-push")->set_kind(SrsApmKindClient)
+        ->as_child(_srs_apm->load()), sdk->extra_args()));
+#endif
     
     if ((err = sdk->connect()) != srs_success) {
         return srs_error_wrap(err, "sdk connect %s failed, cto=%dms, sto=%dms.", url.c_str(), srsu2msi(cto), srsu2msi(sto));
@@ -744,10 +810,8 @@ srs_error_t SrsEdgeForwarder::start()
     if ((err = sdk->publish(_srs_config->get_chunk_size(req->vhost), false, &stream)) != srs_success) {
         return srs_error_wrap(err, "sdk publish");
     }
-    
-    srs_freep(trd);
-    trd = new SrsSTCoroutine("edge-fwr", this, _srs_context->get_id());
-    
+
+    // Start the forwarding coroutine.
     if ((err = trd->start()) != srs_success) {
         return srs_error_wrap(err, "coroutine");
     }
@@ -759,9 +823,12 @@ srs_error_t SrsEdgeForwarder::start()
 
 void SrsEdgeForwarder::stop()
 {
+    // Make sure the coroutine is stopped before disposing the sdk,
+    // for sdk is used by coroutine.
     trd->stop();
-    queue->clear();
     srs_freep(sdk);
+
+    queue->clear();
 }
 
 // when error, edge ingester sleep for a while and retry.
@@ -779,6 +846,11 @@ srs_error_t SrsEdgeForwarder::cycle()
         }
 
         if ((err = do_cycle()) != srs_success) {
+            // If cycle stopping, we should always set the quit error code.
+            if (send_error_code == 0) {
+                send_error_code = srs_error_code(err);
+            }
+
             return srs_error_wrap(err, "do cycle");
         }
 
@@ -795,10 +867,8 @@ srs_error_t SrsEdgeForwarder::do_cycle()
     srs_error_t err = srs_success;
     
     sdk->set_recv_timeout(SRS_CONSTS_RTMP_PULSE);
-    
-    SrsPithyPrint* pprint = SrsPithyPrint::create_edge();
-    SrsAutoFree(SrsPithyPrint, pprint);
-    
+
+    SrsUniquePtr<SrsPithyPrint> pprint(SrsPithyPrint::create_edge());
     SrsMessageArray msgs(SYS_MAX_EDGE_SEND_MSGS);
     
     while (true) {
@@ -897,7 +967,7 @@ SrsPlayEdge::~SrsPlayEdge()
     srs_freep(ingester);
 }
 
-srs_error_t SrsPlayEdge::initialize(SrsLiveSource* source, SrsRequest* req)
+srs_error_t SrsPlayEdge::initialize(SrsSharedPtr<SrsLiveSource> source, SrsRequest* req)
 {
     srs_error_t err = srs_success;
     
@@ -919,6 +989,16 @@ srs_error_t SrsPlayEdge::on_client_play()
     } else if (state == SrsEdgeStateIngestStopping) {
         return srs_error_new(ERROR_RTMP_EDGE_PLAY_STATE, "state is stopping");
     }
+
+#ifdef SRS_APM
+    // APM bind client span to edge span, which fetch stream from upstream server.
+    // We create a new span to link the two span, because these two spans might be ended.
+    if (ingester->span() && _srs_apm->load()) {
+        ISrsApmSpan* from = _srs_apm->span("play-link")->as_child(_srs_apm->load());
+        ISrsApmSpan* to = _srs_apm->span("edge-link")->as_child(ingester->span())->link(from);
+        srs_freep(from); srs_freep(to);
+    }
+#endif
     
     return err;
 }
@@ -979,7 +1059,7 @@ void SrsPublishEdge::set_queue_size(srs_utime_t queue_size)
     return forwarder->set_queue_size(queue_size);
 }
 
-srs_error_t SrsPublishEdge::initialize(SrsLiveSource* source, SrsRequest* req)
+srs_error_t SrsPublishEdge::initialize(SrsSharedPtr<SrsLiveSource> source, SrsRequest* req)
 {
     srs_error_t err = srs_success;
     

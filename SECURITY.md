@@ -1,15 +1,8 @@
 # Security Policy
 
-## Supported Versions
+We appreciate work to discover security vulnerabilities, but as SRS is entirely volunteer driven, 
+so we might not be able to respond to issues in time.
 
-The versions of SRS that are currently being supported with security updates.
+Please click [here](https://github.com/ossrs/srs/security/advisories) to report a vulnerability.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.x   | :white_check_mark: |
-| 4.x   | :white_check_mark: |
-| < 4.0   | :x:                |
 
-## Reporting a Vulnerability
-
-Please email to winlinvip@gmail.com to report vulnerability.
